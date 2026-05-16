@@ -19,13 +19,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal", tags=["Internal — Health & Stats"])
 
 
-def _llm_model_label() -> str:
-    s = app_config.settings
-    if s.llm_backend.strip().lower() == "openai":
-        return s.openai_llm_model
-    return s.ollama_llm_model
-
-
 async def _db_ping(db_path: str) -> bool:
     def _run() -> None:
         con = sqlite3.connect(db_path, timeout=2.0)
@@ -54,8 +47,6 @@ async def internal_health() -> dict[str, Any]:
         "container_type": s.container_type,
         "vectordb_backend": s.vectordb_backend,
         "embedding_backend": s.embedding_backend,
-        "llm_backend": s.llm_backend,
-        "llm_model": _llm_model_label(),
         "rag_wiki_fetch_threshold": s.rag_wiki_fetch_threshold,
         "data_dir": s.data_dir,
         "uptime_seconds": up,
@@ -76,7 +67,6 @@ async def internal_stats(request: Request) -> dict[str, Any]:
         "system": {
             "vectordb_backend": s.vectordb_backend,
             "embedding_backend": s.embedding_backend,
-            "llm_model": _llm_model_label(),
             "db_path": s.db_path,
             "uptime_seconds": up,
         },

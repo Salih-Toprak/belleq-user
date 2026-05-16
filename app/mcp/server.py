@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -26,27 +27,21 @@ def build_mcp_server(pipeline: QueryPipeline, settings: "Settings") -> FastMCP:
     @mcp.tool()
     async def query_knowledge_base(query: str) -> str:
         """
-        Query the Mnemo knowledge base.
+        Retrieve relevant document chunks from the Mnemo knowledge base.
 
         Search through your organization's ingested documents
         (Slack messages, Notion pages, uploaded files) and return
-        a synthesized answer with source citations.
+        matching chunks with metadata. No answer generation —
+        the caller decides how to use the chunks.
 
         Args:
             query: The question or topic to search for.
 
         Returns:
-            A text answer with cited sources.
+            JSON string containing chunks with text, doc_id, source, and metadata.
         """
         result = await pipeline.query(query)
-        answer = result["answer"]
-        sources = result["sources"]
-        if sources:
-            source_lines = "\n".join(
-                f"- {s['doc_title']} ({s['source']})" for s in sources
-            )
-            answer += f"\n\nSources:\n{source_lines}"
-        return answer
+        return json.dumps(result, ensure_ascii=False)
 
     logger.info("mcp_server_built name=%s", settings.resolved_mcp_server_name)
     return mcp

@@ -33,11 +33,6 @@ def _redact_value(key: str, value: Any) -> Any:
 
 
 def _public_config_dict(s: Any) -> dict[str, Any]:
-    llm_model = (
-        s.openai_llm_model
-        if s.llm_backend.strip().lower() == "openai"
-        else s.ollama_llm_model
-    )
     out: dict[str, Any] = {
         "user_id": s.user_id,
         "display_name": s.display_name,
@@ -48,8 +43,6 @@ def _public_config_dict(s: Any) -> dict[str, Any]:
         "embedding_backend": s.embedding_backend,
         "ollama_embed_model": s.ollama_embed_model,
         "embedding_vector_size": s.embedding_vector_size,
-        "llm_backend": s.llm_backend,
-        "llm_model": llm_model,
         "rag_wiki_fetch_threshold": s.rag_wiki_fetch_threshold,
         "rag_wiki_decay_interval_hours": s.rag_wiki_decay_interval_hours,
         "rag_wiki_top_k": s.rag_wiki_top_k,
@@ -70,8 +63,6 @@ class RuntimePatch(BaseModel):
     display_name: str | None = None
     rag_wiki_fetch_threshold: int | None = Field(default=None, ge=1)
     rag_wiki_top_k: int | None = Field(default=None, ge=1)
-    llm_temperature: float | None = Field(default=None, ge=0.0, le=1.0)
-    llm_max_tokens: int | None = Field(default=None, ge=1)
     mcp_enabled: bool | None = None
 
 
@@ -85,10 +76,6 @@ async def patch_config(body: RuntimePatch, request: Request) -> dict[str, Any]:
         updates["rag_wiki_fetch_threshold"] = body.rag_wiki_fetch_threshold
     if body.rag_wiki_top_k is not None:
         updates["rag_wiki_top_k"] = body.rag_wiki_top_k
-    if body.llm_temperature is not None:
-        updates["llm_temperature"] = body.llm_temperature
-    if body.llm_max_tokens is not None:
-        updates["llm_max_tokens"] = body.llm_max_tokens
     if body.mcp_enabled is not None:
         updates["mcp_enabled"] = body.mcp_enabled
     if not updates:
@@ -114,7 +101,7 @@ async def patch_config(body: RuntimePatch, request: Request) -> dict[str, Any]:
         pipeline.bind_settings(new_settings)
     notes = (
         "Yeniden başlatma gerektiren ayarlar: vectordb_backend, qdrant_url, "
-        "embedding_backend, ollama_embed_model, llm_backend, llm_model, app_port. "
+        "embedding_backend, ollama_embed_model, app_port. "
         "mcp_enabled değişikliği MCP HTTP montajını tam olarak yansıtmayabilir; "
         "üretimde MCP aç/kapa için konteyneri yeniden başlatın."
     )

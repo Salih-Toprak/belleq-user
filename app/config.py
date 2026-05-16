@@ -17,8 +17,6 @@ RUNTIME_CONFIG_KEYS = frozenset(
         "display_name",
         "rag_wiki_fetch_threshold",
         "rag_wiki_top_k",
-        "llm_temperature",
-        "llm_max_tokens",
         "mcp_enabled",
     }
 )
@@ -67,16 +65,6 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     openai_embed_model: str = "text-embedding-3-small"
-
-    # ── LLM (for response generation) ────────────────────────────
-    llm_backend: str = "ollama"
-    ollama_llm_url: str = "http://ollama:11434"
-    ollama_llm_model: str = "qwen2.5:3b"
-    openai_llm_api_key: str = ""
-    openai_llm_model: str = "gpt-4o-mini"
-    llm_timeout: float = 120.0
-    llm_max_tokens: int = 1024
-    llm_temperature: float = 0.3
 
     # ── rag-wiki lifecycle ────────────────────────────────────────
     rag_wiki_fetch_threshold: int = 3

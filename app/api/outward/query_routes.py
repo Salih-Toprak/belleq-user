@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,9 +20,7 @@ router = APIRouter(prefix="/query", tags=["Query — User Facing"])
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
-    system_prompt: str | None = None
     top_k: int | None = Field(default=None, ge=1)
-    include_provenance: bool = True
 
     @field_validator("query")
     @classmethod
@@ -37,13 +33,14 @@ class QueryRequest(BaseModel):
 
 @router.get("/health")
 async def query_health() -> dict[str, str]:
+    """Returns retrieval subsystem health."""
     s = app_config.settings
-    model = (
-        s.openai_llm_model
-        if s.llm_backend.strip().lower() == "openai"
-        else s.ollama_llm_model
-    )
-    return {"status": "ok", "user_id": s.user_id, "model": model}
+    return {
+        "status": "ok",
+        "user_id": s.user_id,
+        "vectordb_backend": s.vectordb_backend,
+        "embedding_backend": s.embedding_backend,
+    }
 
 
 @router.post("", dependencies=[Depends(require_user)])
@@ -51,6 +48,10 @@ async def post_query(
     body: QueryRequest,
     pipeline: QueryPipeline = Depends(get_pipeline),
 ) -> dict[str, Any]:
+    """
+    Returns relevant document chunks from the rag-wiki lifecycle retriever.
+    No answer generation — the caller is responsible for using the chunks.
+    """
     if app_state.get_vectordb() is None:
         raise HTTPException(
             status_code=503,
@@ -61,19 +62,11 @@ async def post_query(
             status_code=503,
             detail="Embedding service is not available. Check EMBEDDING_* settings and connectivity.",
         )
-    t0 = time.perf_counter()
-    qid = str(uuid.uuid4())
     try:
         result = await pipeline.query(
             body.query.strip(),
-            system_prompt=body.system_prompt,
             top_k=body.top_k,
         )
-    except RuntimeError as e:
-        msg = str(e).lower()
-        if "ollama" in msg or "openai" in msg or "llm" in msg:
-            raise HTTPException(status_code=503, detail=str(e)) from e
-        raise
     except Exception as e:
         msg = str(e).lower()
         if "vector" in msg or "qdrant" in msg or "pinecone" in msg:
@@ -82,15 +75,4 @@ async def post_query(
                 detail="Vector database query failed.",
             ) from e
         raise
-    latency_ms = int((time.perf_counter() - t0) * 1000)
-    out: dict[str, Any] = {
-        "answer": result["answer"],
-        "sources": result["sources"],
-        "model": result["model"],
-        "user_id": result["user_id"],
-        "query_id": qid,
-        "latency_ms": latency_ms,
-    }
-    if body.include_provenance:
-        out["provenance"] = result.get("provenance") or {}
-    return out
+    return result

@@ -1,8 +1,20 @@
 # mnemo-user
 
-Headless **per-user knowledge lifecycle container** for the [Mnemo](https://github.com/sstprk) platform (`sstprk` org). It is **not** a browser application: it is a FastAPI service that sits between the **master** stack (shared vector database, ingestion) and end-user tools (chatbots, MCP clients, custom integrations).
+Per-user **retrieval-as-a-service** container for the [Mnemo](https://github.com/sstprk) platform. It runs the **rag-wiki** lifecycle system and returns relevant document chunks to whoever calls it. It has no LLM, no answer generation, no use-case-specific logic.
 
-Each deployment runs **one** `USER_ID` (chatbot, employee, agent, …). All **rag-wiki** lifecycle state is stored under `/app/data/{USER_ID}/` on disk (SQLite + JSON overrides) and survives restarts.
+Each deployment runs **one** `USER_ID`. All rag-wiki lifecycle state is stored under `/app/data/{USER_ID}/` on disk (SQLite + JSON overrides) and survives restarts.
+
+---
+
+## What this container does
+
+- Accepts a plain text query
+- Runs it through rag-wiki (personal cache → master vector DB fallback)
+- Returns matching document chunks with metadata
+- Tracks retrieval counts and lifecycle state (SURFACED/CLAIMED/PINNED)
+- Exposes health and stats to the master API
+
+It does **not** call any LLM or generate answers. The caller decides what to do with the chunks.
 
 ---
 
@@ -11,7 +23,7 @@ Each deployment runs **one** `USER_ID` (chatbot, employee, agent, …). All **ra
 | Surface | Base path | Auth | Purpose |
 |--------|-----------|------|---------|
 | **Inward** (master / dashboard) | `/internal/*` | `X-Master-Key` | Health, stats, document CRUD, runtime config |
-| **Outward** (users / bots / MCP) | `POST /query`, MCP | `X-Api-Key` on HTTP query (`/query/health` has no auth) | RAG answers with citations |
+| **Outward** (users / bots / MCP) | `POST /query`, MCP | `X-Api-Key` on HTTP query (`/query/health` has no auth) | Chunk retrieval |
 
 OpenAPI: **`/docs`**, **`/redoc`**.
 
@@ -30,14 +42,43 @@ Example:
 curl -sS -X POST "http://localhost:8000/query" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: your-user-key" \
-  -d '{"query":"What is our vacation policy?","include_provenance":true}'
+  -d '{"query":"What is our vacation policy?"}'
+```
+
+Response:
+
+```json
+{
+  "chunks": [
+    {
+      "text": "Our vacation policy allows...",
+      "doc_id": "doc-123",
+      "doc_title": "HR Policies",
+      "source": "notion",
+      "channel": "",
+      "department": "hr",
+      "chunk_index": 0,
+      "total_chunks": 3,
+      "state": "GLOBAL",
+      "metadata": {}
+    }
+  ],
+  "user_id": "user-001",
+  "query_id": "uuid-here",
+  "latency_ms": 42,
+  "provenance": {
+    "cache_hits": 1,
+    "global_hits": 2,
+    "total_retrieved": 3
+  }
+}
 ```
 
 ---
 
 ## Claude Desktop (MCP over SSE)
 
-Set `MCP_ENABLED=true` (default). The MCP app is mounted at **`/mcp`** using FastMCP’s **SSE** transport. The SSE entry is typically:
+Set `MCP_ENABLED=true` (default). The MCP app is mounted at **`/mcp`** using FastMCP's **SSE** transport. The SSE entry is typically:
 
 `http://<container-host>:8000/mcp/sse`
 
@@ -53,20 +94,7 @@ Add to **Claude Desktop** config (`claude_desktop_config.json`):
 }
 ```
 
-MCP shares the **same** `QueryPipeline` instance as the HTTP API (no duplicate pipeline).
-
----
-
-## API key example (`/query`)
-
-```bash
-curl -sS -X POST "http://localhost:8000/query" \
-  -H "X-Api-Key: $USER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"Summarize onboarding docs"}'
-```
-
-If `USER_API_KEY` is empty, outward query auth is **open** (dev only).
+MCP shares the **same** `QueryPipeline` instance as the HTTP API (no duplicate pipeline). The MCP tool returns chunks as JSON.
 
 ---
 
@@ -84,8 +112,11 @@ If `USER_API_KEY` is empty, outward query auth is **open** (dev only).
 | `QDRANT_COLLECTION` | No | Collection / logical index name |
 | `PINECONE_*` | If Pinecone | See `.env.example` |
 | `EMBEDDING_BACKEND` | No | `ollama` or `openai` |
-| `OLLAMA_*` / `OPENAI_*` | If used | Embedding + optional LLM keys |
-| `LLM_BACKEND` | No | `ollama` or `openai` |
+| `OLLAMA_BASE_URL` | If Ollama | Ollama service URL for embeddings |
+| `OLLAMA_EMBED_MODEL` | If Ollama | Embedding model name |
+| `OPENAI_API_KEY` | If OpenAI | OpenAI API key for embeddings |
+| `OPENAI_EMBED_MODEL` | If OpenAI | OpenAI embedding model |
+| `EMBEDDING_VECTOR_SIZE` | No | Vector dimensions (default 768) |
 | `RAG_WIKI_*` | No | Fetch threshold, decay interval, top-k |
 | `MASTER_API_KEY` | No | Master `X-Master-Key` (empty = open) |
 | `USER_API_KEY` | No | User `X-Api-Key` (empty = open) |
@@ -131,33 +162,15 @@ networks:
 
 ---
 
-## Registering with mnemo-master
-
-Point the master registry at this container’s **base URL** (scheme + host + port):
-
-```bash
-curl -sS -X POST "http://<master-host>:<master-port>/master/registry/containers" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user-001",
-    "base_url": "http://mnemo-container-user-001:8000",
-    "display_name": "User 001 Assistant"
-  }'
-```
-
-(Exact master path and body may match your mnemo-master API.)
-
----
-
 ## Runtime vs restart configuration
 
 **Adjustable at runtime** (via `PATCH /internal/config` and persisted in `runtime_config.json`):
 
-- `display_name`, `rag_wiki_fetch_threshold`, `rag_wiki_top_k`, `llm_temperature`, `llm_max_tokens`, `mcp_enabled`
+- `display_name`, `rag_wiki_fetch_threshold`, `rag_wiki_top_k`, `mcp_enabled`
 
 **Requires container restart** (documented in PATCH response `patch_notes`):
 
-- Vector DB backend/URL, embedding backend/model, LLM backend/model, `app_port` / image CMD port
+- Vector DB backend/URL, embedding backend/model, `app_port` / image CMD port
 
 ---
 
@@ -176,7 +189,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 - `app/vectordb/` and `app/embeddings/` — duplicated from **mnemo-master** adapters (see file headers); keep in sync manually.
 - `app/lifecycle/` — rag-wiki stores, retriever, APScheduler decay job
-- `app/query/` — RAG + LLM pipeline
+- `app/query/` — retrieval pipeline (chunks only, no LLM)
 - `app/mcp/` — FastMCP SSE server
 - `app/api/` — inward + outward routers
 
