@@ -42,12 +42,26 @@ class QdrantAdapter(VectorDBAdapter):
     backend_name = "qdrant"
 
     def __init__(self, url: str, api_key: str | None = None, timeout: float = 30.0) -> None:
-        kwargs: dict[str, Any] = {"url": url, "timeout": timeout}
-        if api_key:
-            kwargs["api_key"] = api_key
-        self._client = AsyncQdrantClient(**kwargs)
         self._url = url
+        self._api_key = api_key
+        self._timeout = timeout
+        self._client = self._make_client()
         logger.info("qdrant_adapter_init url=%s has_api_key=%s", url, bool(api_key))
+
+    def _make_client(self) -> AsyncQdrantClient:
+        kwargs: dict[str, Any] = {"url": self._url, "timeout": self._timeout}
+        if self._api_key:
+            kwargs["api_key"] = self._api_key
+        return AsyncQdrantClient(**kwargs)
+
+    async def _reconnect(self) -> None:
+        """Recreate the async client after a stale event loop error."""
+        try:
+            await self._client.close()
+        except Exception:
+            pass
+        self._client = self._make_client()
+        logger.info("qdrant_adapter_reconnected url=%s", self._url)
 
     async def health(self) -> dict:
         try:
@@ -144,27 +158,35 @@ class QdrantAdapter(VectorDBAdapter):
         top_k: int = 5,
         filters: dict | None = None,
     ) -> list[dict]:
-        try:
-            flt = filter_utils.build_qdrant_filter(filters)
-            res = await self._client.search(
-                collection_name=collection_name,
-                query_vector=query_vector,
-                limit=top_k,
-                query_filter=flt,
-                with_payload=True,
-            )
-            out: list[dict] = []
-            for hit in res:
-                out.append(
-                    {
-                        "id": str(hit.id),
-                        "score": float(hit.score),
-                        "payload": hit.payload or {},
-                    }
+        for attempt in range(2):
+            try:
+                flt = filter_utils.build_qdrant_filter(filters)
+                res = await self._client.search(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    limit=top_k,
+                    query_filter=flt,
+                    with_payload=True,
                 )
-            return out
-        except Exception as e:  # noqa: BLE001
-            raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
+                out: list[dict] = []
+                for hit in res:
+                    out.append(
+                        {
+                            "id": str(hit.id),
+                            "score": float(hit.score),
+                            "payload": hit.payload or {},
+                        }
+                    )
+                return out
+            except Exception as e:  # noqa: BLE001
+                if attempt == 0 and "event loop is closed" in str(e).lower():
+                    logger.warning(
+                        "qdrant_search_stale_loop attempt=%d — reconnecting", attempt
+                    )
+                    await self._reconnect()
+                    continue
+                raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
+        raise VectorDBError("search failed after reconnect", self.backend_name)
 
     async def delete_by_normalized_filter(
         self,

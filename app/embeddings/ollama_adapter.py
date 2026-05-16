@@ -28,6 +28,7 @@ class OllamaEmbeddingAdapter(EmbeddingAdapter):
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._vector_size = int(vector_size)
+        self._timeout = timeout
         self._client = httpx.AsyncClient(timeout=timeout)
         logger.info(
             "ollama_embedding_init base_url=%s model=%s vector_size=%s",
@@ -127,20 +128,39 @@ class OllamaEmbeddingAdapter(EmbeddingAdapter):
     def embed_query(self, text: str) -> list[float]:
         """
         Sync wrapper required by rag-wiki / LangChain embedding interface.
-        Uses asyncio.run() which works correctly in any thread context.
+
+        Uses a short-lived httpx.Client (synchronous) instead of asyncio.run()
+        to avoid creating and destroying event loops, which would corrupt the
+        shared async httpx client used by embed_batch() and the Qdrant adapter.
         """
-        import asyncio
+        url = f"{self._base_url}/api/embed"
         try:
-            return asyncio.run(self.embed_one(text))
-        except Exception as e:
+            with httpx.Client(timeout=self._timeout) as client:
+                r = client.post(url, json={"model": self._model, "input": [text]})
+                r.raise_for_status()
+                vecs = self._parse_embeddings(r.json(), 1)
+                return vecs[0]
+        except EmbeddingError:
+            raise
+        except Exception as e:  # noqa: BLE001
             raise EmbeddingError(str(e), self.backend_name) from e
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """
         Sync wrapper required by rag-wiki / LangChain embedding interface.
+
+        Uses a short-lived httpx.Client (synchronous) instead of asyncio.run()
+        to avoid event loop lifecycle issues (see embed_query docstring).
         """
-        import asyncio
+        if not texts:
+            return []
+        url = f"{self._base_url}/api/embed"
         try:
-            return asyncio.run(self.embed_batch(texts))
-        except Exception as e:
+            with httpx.Client(timeout=self._timeout) as client:
+                r = client.post(url, json={"model": self._model, "input": texts})
+                r.raise_for_status()
+                return self._parse_embeddings(r.json(), len(texts))
+        except EmbeddingError:
+            raise
+        except Exception as e:  # noqa: BLE001
             raise EmbeddingError(str(e), self.backend_name) from e
