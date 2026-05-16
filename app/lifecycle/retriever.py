@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.callbacks import (
@@ -18,6 +19,32 @@ if TYPE_CHECKING:
     from app.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# ── Persistent background event loop ────────────────────────────────────────
+# All async clients (httpx for embeddings, AsyncQdrantClient) must live on a
+# single event loop that never closes.  asyncio.run() creates and DESTROYS
+# loops, corrupting connection pools.  This module-level loop runs forever in
+# a daemon thread; sync code schedules coroutines on it via
+# run_coroutine_threadsafe and awaits the future.
+
+_bg_loop: asyncio.AbstractEventLoop | None = None
+_bg_lock = threading.Lock()
+
+
+def _get_persistent_loop() -> asyncio.AbstractEventLoop:
+    """Return (and lazily create) a long-lived background event loop."""
+    global _bg_loop
+    if _bg_loop is not None and not _bg_loop.is_closed():
+        return _bg_loop
+    with _bg_lock:
+        if _bg_loop is not None and not _bg_loop.is_closed():
+            return _bg_loop
+        loop = asyncio.new_event_loop()
+        t = threading.Thread(target=loop.run_forever, daemon=True, name="persistent-loop")
+        t.start()
+        _bg_loop = loop
+        logger.debug("persistent_background_loop_started")
+        return _bg_loop
 
 
 class VectorDBRetrieverAdapter(BaseRetriever):
@@ -58,7 +85,12 @@ class VectorDBRetrieverAdapter(BaseRetriever):
             logger.warning("vector_retriever_skip vd_or_embedder_none")
             return []
         try:
-            qvec = await emb.embed_one(query)
+            # Use the sync embed_query wrapper (httpx.Client, no event loop issues)
+            # to compute the query vector. This is safe even when called from
+            # the persistent background loop because it doesn't touch the
+            # async client at all.
+            loop = asyncio.get_running_loop()
+            qvec = await loop.run_in_executor(None, emb.embed_query, query)
         except Exception:
             logger.exception("vector_retriever_embed_failed")
             return []
@@ -91,14 +123,9 @@ class VectorDBRetrieverAdapter(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self._fetch_async(query))
-        raise RuntimeError(
-            "VectorDBRetrieverAdapter._get_relevant_documents sync çağrısı "
-            "aktif event loop içinde desteklenmiyor; ainvoke veya executor kullanın.",
-        )
+        loop = _get_persistent_loop()
+        future = asyncio.run_coroutine_threadsafe(self._fetch_async(query), loop)
+        return future.result(timeout=60)
 
     async def _aget_relevant_documents(
         self,
