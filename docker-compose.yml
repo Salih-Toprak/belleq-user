@@ -1,5 +1,5 @@
 services:
-  container:
+  user:
     build: .
     container_name: belleq-user
     ports:
