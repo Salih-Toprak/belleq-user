@@ -12,10 +12,16 @@ from fastapi.responses import JSONResponse
 import app.config as app_config
 import app.state as state
 from app.api.inward.config_routes import router as internal_config_router
+from app.api.inward.conversation_routes import router as internal_conversation_router
 from app.api.inward.docs_routes import router as internal_docs_router
 from app.api.inward.health_routes import router as internal_health_router
 from app.api.outward.query_routes import router as query_router
 from app.config import settings
+from app.conversation.capture import ConversationCapture
+from app.conversation.extraction import ExtractionWorker, build_extractor
+from app.conversation.kb_writer import KBWriter
+from app.conversation.session_manager import SessionManager
+from app.conversation.store import ConversationStore
 from app.embeddings.factory import get_embedding_adapter
 from app.lifecycle.decay_scheduler import DecayScheduler
 from app.lifecycle.retriever import LifecycleRetriever
@@ -91,11 +97,25 @@ async def lifespan(app: FastAPI):
     retriever.build()
     state._lifecycle_retriever = retriever
 
+    # ── Conversation capture & archive ───────────────────────────
+    conversation_store = None
+    conversation_capture = None
+    session_manager = None
+    if settings.conversation_capture_enabled:
+        conversation_store = ConversationStore(settings.conversations_db_path)
+        conversation_capture = ConversationCapture(conversation_store, settings)
+        state._conversation_store = conversation_store
+        state._conversation_capture = conversation_capture
+        app.state.conversation_store = conversation_store
+        app.state.conversation_capture = conversation_capture
+        logger.info("Conversation capture enabled: %s", settings.conversations_db_path)
+
     pipeline = QueryPipeline(
         user_id=settings.user_id,
         lifecycle_retriever=retriever,
         global_store=global_store,
         settings=settings,
+        capture=conversation_capture,
     )
     state._pipeline = pipeline
     app.state.pipeline = pipeline
@@ -113,8 +133,33 @@ async def lifespan(app: FastAPI):
     decay.start()
     app.state.decay_scheduler = decay
 
+    if conversation_capture is not None and conversation_store is not None:
+        extractor = build_extractor(settings)
+        kb_collection = (
+            settings.pinecone_index_name.strip()
+            if settings.vectordb_backend.strip().lower() == "pinecone"
+            and (settings.pinecone_index_name or "").strip()
+            else settings.qdrant_collection
+        )
+        kb_writer = KBWriter(
+            embedder=state._embedder,
+            vectordb=state._vectordb,
+            global_store=global_store,
+            collection_name=kb_collection,
+            settings=settings,
+        )
+        worker = ExtractionWorker(conversation_store, extractor, kb_writer=kb_writer)
+        session_manager = SessionManager(
+            user_id=settings.user_id,
+            store=conversation_store,
+            worker=worker,
+            settings=settings,
+        )
+        session_manager.start()
+        app.state.session_manager = session_manager
+
     if settings.mcp_enabled:
-        mcp_server = build_mcp_server(pipeline, settings)
+        mcp_server = build_mcp_server(pipeline, settings, conversation_capture)
         app.mount("/mcp", mcp_server.http_app(transport="sse"))
         logger.info(
             "MCP server mounted at /mcp (SSE) name=%s",
@@ -129,6 +174,13 @@ async def lifespan(app: FastAPI):
     yield
 
     app.state.decay_scheduler.stop()
+    if session_manager is not None:
+        session_manager.stop()
+    if conversation_store is not None:
+        try:
+            conversation_store.close()
+        except Exception:
+            logger.debug("conversation_store_close_failed", exc_info=True)
     await pipeline.close()
     emb = state._embedder
     if emb is not None and hasattr(emb, "aclose"):
@@ -180,4 +232,5 @@ async def public_health() -> dict:
 app.include_router(internal_health_router)
 app.include_router(internal_docs_router)
 app.include_router(internal_config_router)
+app.include_router(internal_conversation_router)
 app.include_router(query_router)

@@ -22,11 +22,13 @@ class QueryPipeline:
         lifecycle_retriever: LifecycleRetriever,
         global_store: Any,
         settings: "Settings",
+        capture: Any = None,
     ) -> None:
         self._user_id = user_id
         self._lifecycle = lifecycle_retriever
         self._global_store = global_store
         self._settings = settings
+        self._capture = capture
 
     def bind_settings(self, settings: "Settings") -> None:
         """runtime_config güncellemelerinde ayar referansını yeniler."""
@@ -50,6 +52,15 @@ class QueryPipeline:
             user_message,
             top_k=top_k if top_k is not None else eff.rag_wiki_top_k,
         )
+
+        # Passive query-stream capture — best-effort, never affects the result.
+        if self._capture is not None and getattr(eff, "conversation_capture_enabled", False):
+            try:
+                import asyncio
+
+                await asyncio.to_thread(self._capture.record_query, user_message)
+            except Exception:
+                logger.debug("query_stream_capture_failed", exc_info=True)
 
         try:
             for doc in docs:

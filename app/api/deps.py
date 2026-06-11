@@ -39,3 +39,11 @@ def get_state_store(request: Request) -> Any:
 
 def get_vectordb(request: Request) -> Any:
     return getattr(request.app.state, "vectordb", None)
+
+
+def get_conversation_store(request: Request) -> Any:
+    return getattr(request.app.state, "conversation_store", None)
+
+
+def get_conversation_capture(request: Request) -> Any:
+    return getattr(request.app.state, "conversation_capture", None)

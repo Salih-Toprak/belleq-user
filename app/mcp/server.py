@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 
@@ -16,9 +16,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def build_mcp_server(pipeline: QueryPipeline, settings: "Settings") -> FastMCP:
+def build_mcp_server(
+    pipeline: QueryPipeline,
+    settings: "Settings",
+    capture: Any = None,
+) -> FastMCP:
     """
-    Tek araçlı MCP sunucusu: query_knowledge_base.
+    MCP sunucusu: query_knowledge_base (+ etkinse record_exchange).
     FastAPI uygulamasında /mcp altına monte edilir.
     """
 
@@ -43,5 +47,44 @@ def build_mcp_server(pipeline: QueryPipeline, settings: "Settings") -> FastMCP:
         result = await pipeline.query(query)
         return json.dumps(result, ensure_ascii=False)
 
-    logger.info("mcp_server_built name=%s", settings.resolved_mcp_server_name)
+    if capture is not None and getattr(settings, "conversation_capture_enabled", False):
+
+        @mcp.tool()
+        async def record_exchange(
+            user_message: str,
+            assistant_message: str,
+            conversation_id: str = "",
+        ) -> str:
+            """
+            Save a notable user/assistant exchange to the Belleq knowledge base.
+
+            Call this after exchanges that contain durable, reusable facts about
+            the user, their organization, decisions, preferences, or project
+            details — information worth remembering for future conversations.
+            Pass a stable `conversation_id` to group turns from the same chat so
+            they are extracted together; omit it for a one-off exchange.
+
+            Args:
+                user_message: The user's message in this exchange.
+                assistant_message: The assistant's reply in this exchange.
+                conversation_id: Optional stable id grouping a conversation's turns.
+
+            Returns:
+                JSON string acknowledging the record (session_id, exchange_count).
+            """
+            import asyncio
+
+            ack = await asyncio.to_thread(
+                capture.record_exchange,
+                user_message,
+                assistant_message,
+                conversation_id or None,
+            )
+            return json.dumps(ack, ensure_ascii=False)
+
+    logger.info(
+        "mcp_server_built name=%s record_exchange=%s",
+        settings.resolved_mcp_server_name,
+        bool(capture is not None and getattr(settings, "conversation_capture_enabled", False)),
+    )
     return mcp
