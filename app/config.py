@@ -71,6 +71,21 @@ class Settings(BaseSettings):
     rag_wiki_decay_interval_hours: int = 24
     rag_wiki_top_k: int = 5
 
+    # ── Conversation capture & archive ───────────────────────────
+    # The conversation history subsystem records user/assistant exchanges
+    # (via the record_exchange MCP tool) and passive query traffic, groups
+    # them into sessions, detects session end by idle gap, and routes closed
+    # sessions to fact extraction (>= min_exchanges) or skip (< min_exchanges).
+    conversation_capture_enabled: bool = True
+    conversation_min_exchanges: int = 10
+    conversation_session_idle_minutes: int = 30
+    conversation_sweep_interval_minutes: int = 10
+    # Fact extraction (LLM -> chunk -> embed -> KB) is built in a later slice;
+    # while disabled the worker only classifies/marks sessions and writes nothing.
+    conversation_extraction_enabled: bool = False
+    anthropic_api_key: str = ""
+    extraction_model: str = "claude-haiku-4-5"
+
     # ── Auth ─────────────────────────────────────────────────────
     master_api_key: str = ""
     user_api_key: str = ""
@@ -87,6 +102,11 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> str:
         return f"{self.data_dir}/{self.user_id}/belleq.db"
+
+    @property
+    def conversations_db_path(self) -> str:
+        """Separate SQLite file for conversation capture (rag-wiki owns belleq.db)."""
+        return f"{self.data_dir}/{self.user_id}/conversations.db"
 
     @property
     def db_url(self) -> str:

@@ -15,6 +15,8 @@ _vectordb: Any = None
 _embedder: Any = None
 _lifecycle_retriever: Any = None
 _pipeline: Any = None
+_conversation_store: Any = None
+_conversation_capture: Any = None
 
 
 def get_state_store() -> Any:
@@ -39,6 +41,14 @@ def get_lifecycle_retriever() -> Any:
 
 def get_pipeline() -> Any:
     return _pipeline
+
+
+def get_conversation_store() -> Any:
+    return _conversation_store
+
+
+def get_conversation_capture() -> Any:
+    return _conversation_capture
 
 
 def get_uptime() -> float:
