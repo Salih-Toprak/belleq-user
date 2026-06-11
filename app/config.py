@@ -80,9 +80,18 @@ class Settings(BaseSettings):
     conversation_min_exchanges: int = 10
     conversation_session_idle_minutes: int = 30
     conversation_sweep_interval_minutes: int = 10
-    # Fact extraction (LLM -> chunk -> embed -> KB) is built in a later slice;
-    # while disabled the worker only classifies/marks sessions and writes nothing.
+    # Fact extraction (LLM -> chunk -> embed -> KB). While disabled the worker
+    # only classifies/marks sessions and writes nothing.
     conversation_extraction_enabled: bool = False
+    # Provider for the extraction LLM: "gemini" (Gemini Flash) or "anthropic"
+    # (Claude Haiku). NOTE: the *free* Gemini/AI-Studio tier may train on the
+    # data you send — link billing (paid tier) before routing customer
+    # conversations through it. Claude never trains on API data.
+    extraction_backend: str = "gemini"
+    # Gemini (google-genai) — reads GEMINI_API_KEY / GOOGLE_API_KEY from env if blank.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    # Anthropic (claude) — reads ANTHROPIC_API_KEY from env if blank.
     anthropic_api_key: str = ""
     extraction_model: str = "claude-haiku-4-5"
 

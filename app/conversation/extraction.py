@@ -138,6 +138,60 @@ class HaikuFactExtractor:
             return []
 
 
+class GeminiFactExtractor:
+    """Extract facts with Gemini Flash (sync client; called from the sweep thread).
+
+    Uses the google-genai SDK. Reads GEMINI_API_KEY / GOOGLE_API_KEY from the
+    environment when ``gemini_api_key`` is blank.
+    """
+
+    def __init__(self, settings: "Settings") -> None:
+        self._settings = settings
+        self._model = settings.gemini_model or "gemini-2.5-flash"
+
+    def _client(self):
+        from google import genai
+
+        key = (self._settings.gemini_api_key or "").strip()
+        return genai.Client(api_key=key) if key else genai.Client()
+
+    def extract(
+        self,
+        session: "ConversationSession",
+        turns: list["ConversationTurn"],
+    ) -> list[str]:
+        transcript = _format_transcript(turns)
+        if not transcript.strip():
+            return []
+        try:
+            from google.genai import types
+
+            client = self._client()
+            resp = client.models.generate_content(
+                model=self._model,
+                contents="Extract durable facts from this conversation:\n\n" + transcript,
+                config=types.GenerateContentConfig(
+                    system_instruction=_EXTRACTION_SYSTEM,
+                    response_mime_type="application/json",
+                    response_schema=list[str],  # JSON array of fact strings
+                    max_output_tokens=2000,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("gemini_extract_failed session=%s", session.session_id, exc_info=True)
+            return []
+
+        text = getattr(resp, "text", None) or ""
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):  # tolerate {"facts": [...]} shape too
+                data = data.get("facts", [])
+            return [str(f).strip() for f in data if str(f).strip()]
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("gemini_extract_parse_failed session=%s", session.session_id)
+            return []
+
+
 class ExtractionWorker:
     """Drives extraction + KB-write over ``pending_extraction`` sessions."""
 
@@ -180,7 +234,11 @@ class ExtractionWorker:
 
 def build_extractor(settings: "Settings") -> FactExtractor:
     """Select the active extractor based on config."""
-    if settings.conversation_extraction_enabled:
-        logger.info("extraction_backend=haiku model=%s", settings.extraction_model)
+    if not settings.conversation_extraction_enabled:
+        return NoopFactExtractor()
+    backend = (settings.extraction_backend or "gemini").strip().lower()
+    if backend == "anthropic":
+        logger.info("extraction_backend=anthropic model=%s", settings.extraction_model)
         return HaikuFactExtractor(settings)
-    return NoopFactExtractor()
+    logger.info("extraction_backend=gemini model=%s", settings.gemini_model)
+    return GeminiFactExtractor(settings)
