@@ -176,6 +176,68 @@ def test_haiku_extractor_parses_facts(monkeypatch):
     assert facts == ["User is the CTO of FAIRBANK.", "Budget approved for Q3."]
 
 
+def test_gemini_extractor_parses_facts(monkeypatch):
+    from app.conversation.extraction import GeminiFactExtractor
+    from app.conversation.models import ConversationSession, ConversationTurn
+
+    settings = make_settings(gemini_model="gemini-2.5-flash", gemini_api_key="")
+    extractor = GeminiFactExtractor(settings)
+
+    class _Resp:
+        text = '["User leads the data team.", "Launch is set for August."]'
+
+    class _Models:
+        def generate_content(self, **kwargs):
+            return _Resp()
+
+    class _FakeClient:
+        models = _Models()
+
+    monkeypatch.setattr(extractor, "_client", lambda: _FakeClient())
+    # google.genai.types is imported lazily inside extract(); stub it so the test
+    # doesn't require the SDK to be installed.
+    import sys
+    import types as _t
+
+    fake_types = _t.ModuleType("google.genai.types")
+    fake_types.GenerateContentConfig = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    monkeypatch.setitem(sys.modules, "google.genai", _t.ModuleType("google.genai"))
+    monkeypatch.setitem(sys.modules, "google", _t.ModuleType("google"))
+
+    now = datetime.now(timezone.utc)
+    session = ConversationSession("s1", "mcp_tool", STATUS_PENDING_EXTRACTION, 11, now, now)
+    turns = [ConversationTurn("t1", "s1", "user", "I lead the data team.", "mcp_tool", now)]
+    assert extractor.extract(session, turns) == [
+        "User leads the data team.",
+        "Launch is set for August.",
+    ]
+
+
+def test_build_extractor_selects_backend():
+    from app.conversation.extraction import (
+        GeminiFactExtractor,
+        HaikuFactExtractor,
+        NoopFactExtractor,
+        build_extractor,
+    )
+
+    off = make_settings(conversation_extraction_enabled=False, extraction_backend="gemini")
+    assert isinstance(build_extractor(off), NoopFactExtractor)
+
+    gem = make_settings(
+        conversation_extraction_enabled=True, extraction_backend="gemini",
+        gemini_model="gemini-2.5-flash",
+    )
+    assert isinstance(build_extractor(gem), GeminiFactExtractor)
+
+    ant = make_settings(
+        conversation_extraction_enabled=True, extraction_backend="anthropic",
+        extraction_model="claude-haiku-4-5",
+    )
+    assert isinstance(build_extractor(ant), HaikuFactExtractor)
+
+
 def test_capture_never_raises_on_bad_store():
     class BoomStore:
         def ensure_session(self, *a, **k):
