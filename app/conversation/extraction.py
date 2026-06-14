@@ -237,7 +237,9 @@ def build_extractor(settings: "Settings") -> FactExtractor:
     if not settings.conversation_extraction_enabled:
         return NoopFactExtractor()
     backend = (settings.extraction_backend or "gemini").strip().lower()
-    if backend == "anthropic":
+    # Accept the common aliases for the Claude path so EXTRACTION_BACKEND=claude
+    # or =haiku don't silently fall back to Gemini.
+    if backend in ("anthropic", "claude", "haiku"):
         logger.info("extraction_backend=anthropic model=%s", settings.extraction_model)
         return HaikuFactExtractor(settings)
     logger.info("extraction_backend=gemini model=%s", settings.gemini_model)
