@@ -137,9 +137,34 @@ class Settings(BaseSettings):
                 "USER_ID zorunludur ve boş olamaz. "
                 "Örnek: USER_ID=chatbot veya USER_ID=user-salih",
             )
-        if uid != self.user_id:
-            return self.model_copy(update={"user_id": uid})
+
+        self.user_id = uid
+
+        # URL envs are copied verbatim from the master/backend; an empty or
+        # scheme-less value (e.g. a bare "host:11434") otherwise reaches the
+        # httpx client only at query time as "URL is missing an 'http://' …".
+        # Heal it here: blank → field default, scheme-less → prefix http://.
+        for field in ("ollama_base_url", "qdrant_url"):
+            setattr(
+                self,
+                field,
+                _normalize_url(
+                    getattr(self, field),
+                    default=self.model_fields[field].default,
+                ),
+            )
+
         return self
+
+
+def _normalize_url(value: str, *, default: str) -> str:
+    """Make a service URL usable: blank → default, scheme-less → http://."""
+    v = (value or "").strip()
+    if not v:
+        return default
+    if "://" not in v:
+        return f"http://{v}"
+    return v
 
 
 def _read_runtime_overrides(path: str) -> dict[str, Any]:
