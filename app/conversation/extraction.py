@@ -174,21 +174,35 @@ class GeminiFactExtractor:
                     system_instruction=_EXTRACTION_SYSTEM,
                     response_mime_type="application/json",
                     response_schema=list[str],  # JSON array of fact strings
-                    max_output_tokens=2000,
+                    # gemini-2.5-* turns on "thinking" by default, which spends the
+                    # output-token budget before the JSON body and returns a 200 with
+                    # truncated/empty text (→ parse failure, zero facts written).
+                    # Disable thinking for this structured task and give it headroom.
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    max_output_tokens=4000,
                 ),
             )
         except Exception:  # noqa: BLE001
             logger.warning("gemini_extract_failed session=%s", session.session_id, exc_info=True)
             return []
 
-        text = getattr(resp, "text", None) or ""
+        text = (getattr(resp, "text", None) or "").strip()
+        if not text:
+            logger.warning("gemini_extract_empty session=%s", session.session_id)
+            return []
+        # Tolerate a ```json … ``` fence if the model wraps the array.
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:]
+            text = text.strip()
         try:
             data = json.loads(text)
             if isinstance(data, dict):  # tolerate {"facts": [...]} shape too
                 data = data.get("facts", [])
             return [str(f).strip() for f in data if str(f).strip()]
         except (json.JSONDecodeError, TypeError):
-            logger.warning("gemini_extract_parse_failed session=%s", session.session_id)
+            logger.warning("gemini_extract_parse_failed session=%s raw=%r", session.session_id, text[:200])
             return []
 
 
