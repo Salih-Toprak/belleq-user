@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
         app.state.session_manager = session_manager
 
     if settings.mcp_enabled:
-        mcp_server = build_mcp_server(pipeline, settings, conversation_capture)
+        mcp_server = build_mcp_server(pipeline, settings, conversation_capture, session_manager)
         app.mount("/mcp", mcp_server.http_app(transport="sse"))
         logger.info(
             "MCP server mounted at /mcp (SSE) name=%s",
