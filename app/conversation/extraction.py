@@ -166,21 +166,27 @@ class GeminiFactExtractor:
         try:
             from google.genai import types
 
+            cfg_kwargs: dict[str, Any] = dict(
+                system_instruction=_EXTRACTION_SYSTEM,
+                response_mime_type="application/json",
+                response_schema=list[str],  # JSON array of fact strings
+                max_output_tokens=4000,
+            )
+            # gemini-2.5-* turns on "thinking" by default, which spends the
+            # output-token budget before the JSON body and returns a 200 with
+            # truncated/empty text (→ parse failure, zero facts written). Disable
+            # it when the SDK supports it — older google-genai lacks ThinkingConfig,
+            # so guard with getattr instead of hard-importing it (raising the
+            # token budget still helps on SDKs that can't turn thinking off).
+            thinking_config_cls = getattr(types, "ThinkingConfig", None)
+            if thinking_config_cls is not None:
+                cfg_kwargs["thinking_config"] = thinking_config_cls(thinking_budget=0)
+
             client = self._client()
             resp = client.models.generate_content(
                 model=self._model,
                 contents="Extract durable facts from this conversation:\n\n" + transcript,
-                config=types.GenerateContentConfig(
-                    system_instruction=_EXTRACTION_SYSTEM,
-                    response_mime_type="application/json",
-                    response_schema=list[str],  # JSON array of fact strings
-                    # gemini-2.5-* turns on "thinking" by default, which spends the
-                    # output-token budget before the JSON body and returns a 200 with
-                    # truncated/empty text (→ parse failure, zero facts written).
-                    # Disable thinking for this structured task and give it headroom.
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    max_output_tokens=4000,
-                ),
+                config=types.GenerateContentConfig(**cfg_kwargs),
             )
         except Exception:  # noqa: BLE001
             logger.warning("gemini_extract_failed session=%s", session.session_id, exc_info=True)

@@ -20,6 +20,7 @@ def build_mcp_server(
     pipeline: QueryPipeline,
     settings: "Settings",
     capture: Any = None,
+    session_manager: Any = None,
 ) -> FastMCP:
     """
     MCP sunucusu: query_knowledge_base (+ etkinse record_exchange).
@@ -81,6 +82,28 @@ def build_mcp_server(
                 conversation_id or None,
             )
             return json.dumps(ack, ensure_ascii=False)
+
+    if session_manager is not None and getattr(settings, "conversation_capture_enabled", False):
+
+        @mcp.tool()
+        async def flush_knowledge_base() -> str:
+            """
+            Ingest all buffered conversation exchanges into the knowledge base
+            right now, instead of waiting for the idle-session sweep.
+
+            Closes every open conversation session immediately, extracts durable
+            facts from each, embeds them, and writes them to the knowledge base
+            so they are searchable straight away. Call this after recording
+            exchanges when you want them available without delay.
+
+            Returns:
+                JSON string with counts: closed (sessions closed), pending,
+                skipped, and extracted (sessions whose facts were written).
+            """
+            import asyncio
+
+            result = await asyncio.to_thread(session_manager.flush_now)
+            return json.dumps(result, ensure_ascii=False)
 
     logger.info(
         "mcp_server_built name=%s record_exchange=%s",

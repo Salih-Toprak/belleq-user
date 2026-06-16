@@ -104,6 +104,51 @@ class SessionManager:
             "extracted": extracted,
         }
 
+    def flush_now(self, *, respect_min_exchanges: bool = False) -> dict[str, int]:
+        """Force-close every open session immediately and run extraction now.
+
+        Powers the manual ingestion endpoint/tool: lets a user push buffered
+        conversation facts into the KB without waiting for the idle-gap sweep
+        (and makes end-to-end testing fast). Unlike the periodic sweep, a manual
+        flush does NOT enforce ``min_exchanges`` by default — it is an explicit
+        request to ingest whatever is buffered; pass ``respect_min_exchanges``
+        to apply the same threshold the sweep uses.
+        """
+        threshold = (
+            max(1, int(self._settings.conversation_min_exchanges))
+            if respect_min_exchanges
+            else 1
+        )
+        # last_activity < cutoff selects every open session; a small future
+        # cutoff guards against a just-recorded turn being excluded by clock skew.
+        cutoff = datetime.now(timezone.utc) + timedelta(minutes=1)
+        open_sessions = self._store.get_idle_open_sessions(cutoff)
+        pending = 0
+        skipped = 0
+        for session in open_sessions:
+            if self._store.count_exchanges(session.session_id) >= threshold:
+                self._store.mark_session(session.session_id, STATUS_PENDING_EXTRACTION)
+                pending += 1
+            else:
+                self._store.mark_session(session.session_id, STATUS_SKIPPED)
+                skipped += 1
+
+        extracted = self._worker.run_pending()
+        logger.info(
+            "conversation_flush user=%s closed=%d pending=%d skipped=%d extracted=%d",
+            self._user_id,
+            len(open_sessions),
+            pending,
+            skipped,
+            extracted,
+        )
+        return {
+            "closed": len(open_sessions),
+            "pending": pending,
+            "skipped": skipped,
+            "extracted": extracted,
+        }
+
     def stop(self) -> None:
         if self._scheduler.running:
             self._scheduler.shutdown(wait=False)

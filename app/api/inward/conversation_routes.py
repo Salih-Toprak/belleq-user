@@ -42,6 +42,20 @@ async def conversation_stats(request: Request) -> dict[str, Any]:
     return await asyncio.to_thread(store.stats)
 
 
+@router.post("/flush")
+async def flush_conversations(request: Request) -> dict[str, Any]:
+    """Manually ingest buffered conversations into the KB right now.
+
+    Force-closes every open session and runs extraction immediately, instead of
+    waiting for the idle-gap sweep. Returns counts (closed, pending, skipped,
+    extracted).
+    """
+    sm = getattr(request.app.state, "session_manager", None)
+    if sm is None:
+        raise HTTPException(status_code=503, detail="Conversation extraction is disabled")
+    return await asyncio.to_thread(sm.flush_now)
+
+
 @router.get("")
 async def list_conversations(
     request: Request,
