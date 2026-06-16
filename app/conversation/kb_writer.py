@@ -98,9 +98,13 @@ class KBWriter:
                 }
             )
 
-        # 3) Upsert via the retriever's persistent loop (don't spin a new loop —
-        #    that corrupts the shared async qdrant client; see retriever.py).
+        # 3) Ensure the collection exists, then upsert — both on the retriever's
+        #    persistent loop (don't spin a new loop — that corrupts the shared
+        #    async qdrant client; see retriever.py). A freshly provisioned context
+        #    has a collection *name* but no Qdrant collection until its first
+        #    write, so the upsert would 404 without this.
         loop = _get_persistent_loop()
+        asyncio.run_coroutine_threadsafe(self._ensure_collection(), loop).result(timeout=30)
         fut = asyncio.run_coroutine_threadsafe(
             self._vectordb.upsert(self._collection, points), loop
         )
@@ -120,6 +124,34 @@ class KBWriter:
             written,
         )
         return written
+
+    async def _ensure_collection(self) -> None:
+        """Create the KB collection on demand if Qdrant doesn't have it yet.
+
+        Contexts are provisioned with a collection *name* only; Qdrant holds
+        nothing until the first write, so an empty context's first fact-write
+        would 404. Create it with the embedder's vector size (must match what
+        the master ingestion path and the query pipeline use for this context).
+        """
+        try:
+            existing = await self._vectordb.list_collections()
+            if self._collection in existing:
+                return
+            size = int(getattr(self._embedder, "vector_size", 0) or 0) or int(
+                getattr(self._settings, "embedding_vector_size", 768) or 768
+            )
+            await self._vectordb.create_collection(self._collection, size, "Cosine")
+            logger.info(
+                "kb_collection_created collection=%s vector_size=%d",
+                self._collection,
+                size,
+            )
+        except Exception:  # noqa: BLE001
+            # A race (another writer created it first) surfaces here as
+            # "already exists" — harmless, the upsert below still succeeds.
+            logger.warning(
+                "kb_ensure_collection_failed collection=%s", self._collection, exc_info=True
+            )
 
     def _register_global_doc(
         self,
