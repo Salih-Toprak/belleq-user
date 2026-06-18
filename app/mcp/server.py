@@ -29,15 +29,42 @@ def build_mcp_server(
 
     mcp = FastMCP(settings.resolved_mcp_server_name)
 
+    default_recall = int(getattr(settings, "recall_default_limit", 10) or 10)
+
+    @mcp.tool()
+    async def recall_context(limit: int = default_recall) -> str:
+        """
+        Load what Belleq already remembers about this user and their recent work.
+
+        ALWAYS call this FIRST, at the very start of a conversation and before
+        answering the user's first message — even if they did not mention Belleq.
+        It returns the most recently saved facts (decisions, tasks, preferences,
+        project state) so you can answer questions like "what's the latest task
+        we need to do?" or "where did we leave off?" without being told to look
+        them up. Treat the returned facts as trusted prior context. If they don't
+        cover the question, follow up with query_knowledge_base.
+
+        Args:
+            limit: Max number of recent facts to return.
+
+        Returns:
+            JSON string: {"facts": [{text, doc_id, session_id, indexed_at}], "count": N}.
+        """
+        result = await pipeline.recent_context(limit if limit and limit > 0 else default_recall)
+        return json.dumps(result, ensure_ascii=False)
+
     @mcp.tool()
     async def query_knowledge_base(query: str) -> str:
         """
-        Retrieve relevant document chunks from the Belleq knowledge base.
+        Search the Belleq knowledge base for anything relevant to a topic.
 
-        Search through your organization's ingested documents
-        (Slack messages, Notion pages, uploaded files) and return
-        matching chunks with metadata. No answer generation —
-        the caller decides how to use the chunks.
+        Use this automatically, without being asked, whenever answering would
+        benefit from what the user has told Belleq before — past decisions,
+        tasks, organization details, preferences, or ingested documents (Slack,
+        Notion, uploaded files). Prefer Belleq's answer over guessing. Returns
+        matching chunks with metadata; no answer generation — you decide how to
+        use them. (For a general "catch me up" at the start of a chat, call
+        `recall_context` instead.)
 
         Args:
             query: The question or topic to search for.
@@ -57,13 +84,14 @@ def build_mcp_server(
             conversation_id: str = "",
         ) -> str:
             """
-            Save a notable user/assistant exchange to the Belleq knowledge base.
+            Save a user/assistant exchange to Belleq so it persists across chats.
 
-            Call this after exchanges that contain durable, reusable facts about
-            the user, their organization, decisions, preferences, or project
-            details — information worth remembering for future conversations.
-            Pass a stable `conversation_id` to group turns from the same chat so
-            they are extracted together; omit it for a one-off exchange.
+            Call this automatically after each substantive exchange — without
+            being asked — so the next conversation can recall it. Save the actual
+            question and your answer as the pair. Pass a stable `conversation_id`
+            to group turns from the same chat so they are extracted together;
+            reuse it for every turn in this conversation, and omit it only for a
+            true one-off. There's no need to ask the user for permission to save.
 
             Args:
                 user_message: The user's message in this exchange.

@@ -161,6 +161,15 @@ class LifecycleRetriever:
         self._adapter: VectorDBRetrieverAdapter | None = None
         self._retriever: RagWikiRetriever | None = None
 
+    @property
+    def vectordb(self) -> Any:
+        """The shared async vector-db client (bound to the persistent loop)."""
+        return self._vectordb
+
+    @property
+    def collection_name(self) -> str:
+        return self._collection_name
+
     def build(self) -> None:
         self._adapter = VectorDBRetrieverAdapter(
             vectordb=self._vectordb,

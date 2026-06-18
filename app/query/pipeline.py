@@ -106,5 +106,23 @@ class QueryPipeline:
             "provenance": prov,
         }
 
+    async def recent_context(self, limit: int = 10) -> dict:
+        """Return the most recently saved knowledge (conversation facts).
+
+        Powers the zero-instruction `recall_context` MCP tool: a cheap, no-LLM
+        primer the connected AI calls at the start of a chat to load what belleq
+        already knows. Delegates to `app.conversation.recall.recent_facts`,
+        which marshals vector-db access onto the retriever's persistent loop
+        (the async qdrant client is bound to it — see retriever.py).
+        """
+        from app.conversation.recall import recent_facts
+
+        return await recent_facts(
+            self._global_store,
+            self._lifecycle.vectordb,
+            self._lifecycle.collection_name,
+            limit,
+        )
+
     async def close(self) -> None:
         pass
