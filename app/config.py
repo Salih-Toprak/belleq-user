@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     conversation_min_exchanges: int = 10
     conversation_session_idle_minutes: int = 30
     conversation_sweep_interval_minutes: int = 10
+    # How many recent saved facts `recall_context` returns by default (the
+    # zero-instruction "load my situation" primer the connected AI calls first).
+    recall_default_limit: int = 10
     # Fact extraction (LLM -> chunk -> embed -> KB). While disabled the worker
     # only classifies/marks sessions and writes nothing.
     conversation_extraction_enabled: bool = False
