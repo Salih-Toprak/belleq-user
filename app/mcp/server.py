@@ -21,6 +21,7 @@ def build_mcp_server(
     settings: "Settings",
     capture: Any = None,
     session_manager: Any = None,
+    ingestion_queue: Any = None,
 ) -> FastMCP:
     """
     MCP sunucusu: query_knowledge_base (+ etkinse record_exchange).
@@ -175,6 +176,67 @@ def build_mcp_server(
             import asyncio
 
             result = await asyncio.to_thread(session_manager.flush_now)
+            return json.dumps(result, ensure_ascii=False)
+
+    if ingestion_queue is not None:
+
+        @mcp.tool()
+        async def upload_document(
+            filename: str,
+            content_base64: str = "",
+            text: str = "",
+            title: str = "",
+        ) -> str:
+            """
+            Add a document to this context's knowledge base so it's searchable
+            later with query_knowledge_base.
+
+            Provide EITHER `text` (plain text already in hand) OR `content_base64`
+            (a base64-encoded file). Supported file types: PDF, DOCX, Markdown,
+            TXT, HTML. The document is chunked, embedded, and indexed in the
+            background; identical content is de-duplicated automatically.
+
+            Args:
+                filename: Original file name (its extension picks the parser).
+                content_base64: Base64-encoded file bytes (for binary files).
+                text: Plain text content (use instead of content_base64).
+                title: Optional display title; defaults to the filename.
+
+            Returns:
+                JSON: {"job_id", "doc_id", "queued": bool, "duplicate": bool}.
+            """
+            import asyncio
+            import base64
+
+            from app.ingestion.service import enqueue_document
+            from app.ingestion.extractors import ExtractionError
+
+            try:
+                if content_base64.strip():
+                    raw = base64.b64decode(content_base64, validate=False)
+                elif text.strip():
+                    raw = text.encode("utf-8")
+                    if not filename:
+                        filename = "upload.txt"
+                else:
+                    return json.dumps({"error": "Provide either text or content_base64."})
+            except Exception as exc:  # noqa: BLE001
+                return json.dumps({"error": f"Could not decode content: {exc}"})
+
+            max_bytes = int(getattr(settings, "ingestion_max_upload_mb", 25)) * 1024 * 1024
+            if len(raw) > max_bytes:
+                return json.dumps({"error": f"File exceeds the {getattr(settings, 'ingestion_max_upload_mb', 25)} MB limit."})
+
+            try:
+                result = await asyncio.to_thread(
+                    enqueue_document,
+                    ingestion_queue,
+                    raw=raw,
+                    filename=filename,
+                    title=title,
+                )
+            except ExtractionError as exc:
+                return json.dumps({"error": str(exc)})
             return json.dumps(result, ensure_ascii=False)
 
     logger.info(

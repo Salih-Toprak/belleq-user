@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     extraction_model: str = "claude-haiku-4-5"
 
+    # ── Ingestion (documents + MCP captures → queue → worker → KB) ──
+    ingestion_enabled: bool = True
+    ingestion_sweep_interval_seconds: int = 20
+    ingestion_max_attempts: int = 5
+    # Max accepted upload size (decoded bytes) before extraction.
+    ingestion_max_upload_mb: int = 25
+
     # ── Auth ─────────────────────────────────────────────────────
     master_api_key: str = ""
     user_api_key: str = ""
@@ -119,6 +126,11 @@ class Settings(BaseSettings):
     def conversations_db_path(self) -> str:
         """Separate SQLite file for conversation capture (rag-wiki owns belleq.db)."""
         return f"{self.data_dir}/{self.user_id}/conversations.db"
+
+    @property
+    def ingestion_db_path(self) -> str:
+        """Separate SQLite file for the ingestion queue."""
+        return f"{self.data_dir}/{self.user_id}/ingestion.db"
 
     @property
     def db_url(self) -> str:

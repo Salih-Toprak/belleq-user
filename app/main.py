@@ -14,6 +14,7 @@ import app.state as state
 from app.api.inward.config_routes import router as internal_config_router
 from app.api.inward.conversation_routes import router as internal_conversation_router
 from app.api.inward.kb_routes import router as internal_kb_router
+from app.api.inward.ingestion_routes import router as internal_ingestion_router
 from app.api.inward.docs_routes import router as internal_docs_router
 from app.api.inward.health_routes import router as internal_health_router
 from app.api.outward.query_routes import router as query_router
@@ -23,6 +24,9 @@ from app.conversation.extraction import ExtractionWorker, build_extractor
 from app.conversation.kb_writer import KBWriter
 from app.conversation.session_manager import SessionManager
 from app.conversation.store import ConversationStore
+from app.ingestion.queue import IngestionQueue
+from app.ingestion.scheduler import IngestionScheduler
+from app.ingestion.worker import IngestionWorker
 from app.embeddings.factory import get_embedding_adapter
 from app.lifecycle.decay_scheduler import DecayScheduler
 from app.lifecycle.retriever import LifecycleRetriever
@@ -134,21 +138,25 @@ async def lifespan(app: FastAPI):
     decay.start()
     app.state.decay_scheduler = decay
 
+    # Shared KB writer (embed → Qdrant → GlobalDocStore). Used by both the
+    # conversation extraction worker and the document/MCP ingestion worker.
+    kb_collection = (
+        settings.pinecone_index_name.strip()
+        if settings.vectordb_backend.strip().lower() == "pinecone"
+        and (settings.pinecone_index_name or "").strip()
+        else settings.qdrant_collection
+    )
+    kb_writer = KBWriter(
+        embedder=state._embedder,
+        vectordb=state._vectordb,
+        global_store=global_store,
+        collection_name=kb_collection,
+        settings=settings,
+    )
+    app.state.kb_writer = kb_writer
+
     if conversation_capture is not None and conversation_store is not None:
         extractor = build_extractor(settings)
-        kb_collection = (
-            settings.pinecone_index_name.strip()
-            if settings.vectordb_backend.strip().lower() == "pinecone"
-            and (settings.pinecone_index_name or "").strip()
-            else settings.qdrant_collection
-        )
-        kb_writer = KBWriter(
-            embedder=state._embedder,
-            vectordb=state._vectordb,
-            global_store=global_store,
-            collection_name=kb_collection,
-            settings=settings,
-        )
         worker = ExtractionWorker(conversation_store, extractor, kb_writer=kb_writer)
         session_manager = SessionManager(
             user_id=settings.user_id,
@@ -159,8 +167,26 @@ async def lifespan(app: FastAPI):
         session_manager.start()
         app.state.session_manager = session_manager
 
+    # ── Ingestion queue + worker (documents + MCP captures) ──────────
+    ingestion_queue = None
+    ingestion_scheduler = None
+    if settings.ingestion_enabled and kb_writer.available():
+        ingestion_queue = IngestionQueue(
+            settings.ingestion_db_path, max_attempts=settings.ingestion_max_attempts
+        )
+        ingestion_worker = IngestionWorker(ingestion_queue, kb_writer)
+        ingestion_scheduler = IngestionScheduler(
+            ingestion_worker, interval_seconds=settings.ingestion_sweep_interval_seconds
+        )
+        ingestion_scheduler.start()
+        app.state.ingestion_queue = ingestion_queue
+        app.state.ingestion_worker = ingestion_worker
+        logger.info("Ingestion enabled: %s", settings.ingestion_db_path)
+
     if settings.mcp_enabled:
-        mcp_server = build_mcp_server(pipeline, settings, conversation_capture, session_manager)
+        mcp_server = build_mcp_server(
+            pipeline, settings, conversation_capture, session_manager, ingestion_queue
+        )
         app.mount("/mcp", mcp_server.http_app(transport="sse"))
         logger.info(
             "MCP server mounted at /mcp (SSE) name=%s",
@@ -177,6 +203,8 @@ async def lifespan(app: FastAPI):
     app.state.decay_scheduler.stop()
     if session_manager is not None:
         session_manager.stop()
+    if ingestion_scheduler is not None:
+        ingestion_scheduler.stop()
     if conversation_store is not None:
         try:
             conversation_store.close()
@@ -235,4 +263,5 @@ app.include_router(internal_docs_router)
 app.include_router(internal_config_router)
 app.include_router(internal_conversation_router)
 app.include_router(internal_kb_router)
+app.include_router(internal_ingestion_router)
 app.include_router(query_router)
