@@ -47,6 +47,20 @@ class RecordBody(BaseModel):
     conversation_id: str = ""
 
 
+class UploadBody(BaseModel):
+    filename: str
+    content_base64: str = ""
+    text: str = ""
+    title: str = ""
+
+
+class CaptureBody(BaseModel):
+    text: str
+    title: str = ""
+    source_label: str = "connector"
+    tool: str = ""
+
+
 @router.post("/recall")
 async def kb_recall(
     body: RecallBody,
@@ -87,3 +101,69 @@ async def kb_flush(request: Request) -> dict[str, Any]:
     if sm is None:
         raise HTTPException(status_code=503, detail="Conversation extraction is disabled")
     return await asyncio.to_thread(sm.flush_now)
+
+
+@router.post("/upload")
+async def kb_upload(body: UploadBody, request: Request) -> dict[str, Any]:
+    """Add a document to the KB (mirror of the upload_document MCP tool).
+
+    Accepts either base64 file bytes or plain text; extracts, dedups, and queues
+    it for chunk → embed → index.
+    """
+    import base64
+
+    from app.ingestion.extractors import ExtractionError
+    from app.ingestion.service import enqueue_document
+
+    queue = getattr(request.app.state, "ingestion_queue", None)
+    if queue is None:
+        raise HTTPException(status_code=503, detail="Ingestion is disabled")
+
+    if body.content_base64.strip():
+        try:
+            raw = base64.b64decode(body.content_base64, validate=False)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Invalid base64: {exc}")
+    elif body.text.strip():
+        raw = body.text.encode("utf-8")
+    else:
+        raise HTTPException(status_code=422, detail="Provide either text or content_base64")
+
+    filename = body.filename or "upload.txt"
+    import app.config as app_config
+
+    max_mb = int(getattr(app_config.settings, "ingestion_max_upload_mb", 25) or 25)
+    if len(raw) > max_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds the {max_mb} MB limit")
+
+    try:
+        return await asyncio.to_thread(
+            enqueue_document, queue, raw=raw, filename=filename, title=body.title
+        )
+    except ExtractionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/capture")
+async def kb_capture(body: CaptureBody, request: Request) -> dict[str, Any]:
+    """Queue a document-like MCP tool response (4C MCP response capture).
+
+    Called by the master's proxy middleware when a connector returns a chunk of
+    document-like text. Dedup + chunk + embed happen via the same queue/worker.
+    """
+    from app.ingestion.service import enqueue_capture
+
+    queue = getattr(request.app.state, "ingestion_queue", None)
+    if queue is None:
+        raise HTTPException(status_code=503, detail="Ingestion is disabled")
+    try:
+        return await asyncio.to_thread(
+            enqueue_capture,
+            queue,
+            text=body.text,
+            title=body.title,
+            source_label=body.source_label,
+            extra={"tool": body.tool} if body.tool else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

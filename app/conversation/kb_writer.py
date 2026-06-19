@@ -52,19 +52,43 @@ class KBWriter:
         return self._embedder is not None and self._vectordb is not None
 
     def write_facts(self, session: "ConversationSession", facts: list[str]) -> int:
-        """Embed + upsert one doc (one chunk per fact). Returns points written."""
-        clean = [f.strip() for f in facts if f and f.strip()]
+        """Embed + upsert one conversation doc (one chunk per fact)."""
+        return self.write_chunks(
+            doc_id=f"conv-{session.session_id}",
+            doc_title=f"Conversation {session.session_id}",
+            doc_path=f"conversation:{session.session_id}",
+            source="conversation",
+            chunks=facts,
+            extra_payload={"session_id": session.session_id},
+        )
+
+    def write_chunks(
+        self,
+        *,
+        doc_id: str,
+        doc_title: str,
+        doc_path: str,
+        source: str,
+        chunks: list[str],
+        department: str = "general",
+        extra_payload: dict[str, Any] | None = None,
+    ) -> int:
+        """Embed + upsert a document (one or more chunks) into the KB.
+
+        Shared by the conversation pipeline (one chunk per fact) and the
+        ingestion pipeline (uploaded docs / MCP captures, many chunks). Returns
+        the number of vector points written.
+        """
+        clean = [c.strip() for c in chunks if c and c.strip()]
         if not clean:
             return 0
         if not self.available():
-            logger.warning("kb_writer_unavailable session=%s", session.session_id)
+            logger.warning("kb_writer_unavailable doc_id=%s", doc_id)
             return 0
 
-        doc_id = f"conv-{session.session_id}"
-        doc_title = f"Conversation {session.session_id}"
-        doc_path = f"conversation:{session.session_id}"
         now = datetime.now(timezone.utc).isoformat()
         total = len(clean)
+        extra = extra_payload or {}
 
         # 1) Embed (sync wrapper, safe from any thread).
         vectors = self._embedder.embed_documents(clean)
@@ -83,17 +107,17 @@ class KBWriter:
                         "doc_id": doc_id,
                         "doc_title": doc_title,
                         "doc_path": doc_path,
-                        "source": "conversation",
+                        "source": source,
                         "chunk_index": i,
                         "total_chunks": total,
-                        "department": "general",
+                        "department": department,
                         "indexed_at": now,
-                        "ac_source_id": "conversation",
+                        "ac_source_id": source,
                         "ac_channels": [],
                         "ac_page_ids": [],
-                        "ac_departments": ["general"],
+                        "ac_departments": [department],
                         "text": text,
-                        "session_id": session.session_id,
+                        **extra,
                     },
                 }
             )
@@ -112,16 +136,13 @@ class KBWriter:
 
         # 4) Register the doc so it shows in the dashboard + gets lifecycle state.
         try:
-            self._register_global_doc(doc_id, doc_title, doc_path, clean, point_ids, now)
+            self._register_global_doc(doc_id, doc_title, doc_path, clean, point_ids, now, source, department)
         except Exception:  # noqa: BLE001
             logger.warning("global_store_register_failed doc_id=%s", doc_id, exc_info=True)
 
         logger.info(
-            "kb_facts_written session=%s doc_id=%s facts=%d points=%d",
-            session.session_id,
-            doc_id,
-            total,
-            written,
+            "kb_chunks_written doc_id=%s source=%s chunks=%d points=%d",
+            doc_id, source, total, written,
         )
         return written
 
@@ -158,9 +179,11 @@ class KBWriter:
         doc_id: str,
         doc_title: str,
         doc_path: str,
-        facts: list[str],
+        chunks: list[str],
         point_ids: list[str],
         now_iso: str,
+        source: str = "conversation",
+        department: str = "general",
     ) -> None:
         from rag_wiki.storage.global_store import GlobalDocRecord
 
@@ -168,14 +191,14 @@ class KBWriter:
         self._global_store.upsert(
             GlobalDocRecord(
                 doc_id=doc_id,
-                source="conversation",
-                department="general",
+                source=source,
+                department=department,
                 doc_title=doc_title,
                 doc_path=doc_path,
                 ingested_at=now,
                 last_updated_at=now,
-                chunk_count=len(facts),
-                doc_size_chars=sum(len(f) for f in facts),
+                chunk_count=len(chunks),
+                doc_size_chars=sum(len(c) for c in chunks),
                 qdrant_ids=",".join(point_ids),
             )
         )
