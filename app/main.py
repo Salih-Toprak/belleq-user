@@ -13,6 +13,7 @@ import app.config as app_config
 import app.state as state
 from app.api.inward.config_routes import router as internal_config_router
 from app.api.inward.conversation_routes import router as internal_conversation_router
+from app.api.inward.kb_routes import router as internal_kb_router
 from app.api.inward.docs_routes import router as internal_docs_router
 from app.api.inward.health_routes import router as internal_health_router
 from app.api.outward.query_routes import router as query_router
@@ -233,4 +234,5 @@ app.include_router(internal_health_router)
 app.include_router(internal_docs_router)
 app.include_router(internal_config_router)
 app.include_router(internal_conversation_router)
+app.include_router(internal_kb_router)
 app.include_router(query_router)
