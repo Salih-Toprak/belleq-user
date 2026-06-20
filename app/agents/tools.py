@@ -47,20 +47,69 @@ KB_READ_SPEC = {
 KB_WRITE_SPEC = {
     "name": "kb_write",
     "description": (
-        "Save important findings, decisions, or learned information back to the "
-        "knowledge base. scope='private' writes to your scoped KB now; "
-        "scope='shared' queues it for human review before promotion."
+        "Save a structured note to the knowledge base — this is how you grow a "
+        "self-organizing wiki. Write ONE idea per note, with a clear title, tags, "
+        "and [[wikilinks]] to related notes so knowledge stays connected and "
+        "compounds across tasks. Before writing, kb_read for an existing note on "
+        "the same topic and reuse its title to supersede it rather than "
+        "duplicating. scope='private' writes to your scoped KB now; scope='shared' "
+        "queues it for human review before promotion."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "content": {"type": "string", "description": "The information to save."},
-            "tags": {"type": "array", "items": {"type": "string"}, "description": "Labels."},
+            "title": {
+                "type": "string",
+                "description": "Short title naming the single thing this note is about.",
+            },
+            "content": {
+                "type": "string",
+                "description": (
+                    "The note body: the fact/finding/decision stated plainly. May "
+                    "include [[Other Note Title]] wikilinks and a Source: line."
+                ),
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "2-5 lowercase keyword tags for retrieval.",
+            },
+            "related": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Titles of related notes to cross-link (wikilinks).",
+            },
+            "source": {
+                "type": "string",
+                "description": "Where this came from: a connector/tool name, URL, or 'reasoning'.",
+            },
             "scope": {"type": "string", "enum": ["private", "shared"], "default": "private"},
         },
         "required": ["content"],
     },
 }
+
+
+def _compose_note(title: str, content: str, tags: list[str], related: list[str], source: str) -> str:
+    """Assemble a self-contained wiki note (frontmatter-ish header + body).
+
+    Stored verbatim as the chunk text so retrieval surfaces the structure and the
+    [[wikilinks]], keeping the KB navigable like an LLM-wiki page.
+    """
+    lines: list[str] = []
+    if title:
+        lines.append(f"# {title}")
+    meta: list[str] = []
+    if tags:
+        meta.append("tags: " + ", ".join(tags))
+    if related:
+        meta.append("related: " + ", ".join(f"[[{r}]]" for r in related))
+    if source:
+        meta.append(f"source: {source}")
+    if meta:
+        lines.append("\n".join(meta))
+    lines.append(content)
+    return "\n\n".join(lines).strip()
 
 
 class Toolbox:
@@ -173,43 +222,57 @@ class Toolbox:
         return out
 
     async def _kb_write(self, args: dict) -> str:
-        content = str(args.get("content", "")).strip()
+        body = str(args.get("content", "")).strip()
+        title = str(args.get("title", "")).strip()
         tags = [str(t) for t in (args.get("tags") or [])]
+        related = [str(r) for r in (args.get("related") or [])]
+        source = str(args.get("source", "")).strip()
         scope = str(args.get("scope", "private")).lower()
         if scope not in ("private", "shared"):
             scope = "private"
-        if not content:
+        if not body:
             self._log("kb_write", "(empty)", "error: content required")
             return "Error: content is required."
 
-        record = {"content": content, "tags": tags, "scope": scope}
+        note = _compose_note(title, body, tags, related, source)
+        # Record the assembled note (what's stored) plus structure for the task log.
+        record = {
+            "content": note,
+            "title": title,
+            "tags": tags,
+            "related": related,
+            "scope": scope,
+        }
         self.kb_writes.append(record)
 
         if scope == "shared":
             # Queued for review by the backend (propagate_to_master_kb); not
             # written to the KB here.
-            self._log("kb_write", f"scope=shared tags={tags}", "queued for review")
+            self._log("kb_write", f"shared title={title!r} tags={tags}", "queued for review")
             return "Saved (shared) — queued for human review before promotion."
 
         # Private: write to the context KB now, tagged with agent + task source.
-        written = await asyncio.to_thread(self._write_private, content, tags)
-        self._log("kb_write", f"scope=private tags={tags}", f"wrote {written} point(s)")
-        return f"Saved to the knowledge base ({written} point)."
+        written = await asyncio.to_thread(self._write_private, title, note, tags, related)
+        self._log("kb_write", f"private title={title!r} tags={tags}", f"wrote {written} point(s)")
+        return f"Saved note to the knowledge base ({written} point)."
 
-    def _write_private(self, content: str, tags: list[str]) -> int:
+    def _write_private(self, title: str, note: str, tags: list[str], related: list[str]) -> int:
         agent_name = self._agent.get("name") or "agent"
         task_id = self._task.get("id", "")
+        doc_title = f"{title} (agent note)" if title else f"Agent note: {agent_name}"
         return self._kb_writer.write_chunks(
-            doc_id=f"agent-{self._agent.get('id','')}-task-{task_id}-{abs(hash(content)) % 10_000_000}",
-            doc_title=f"Agent note: {agent_name}",
+            doc_id=f"agent-{self._agent.get('id','')}-task-{task_id}-{abs(hash(note)) % 10_000_000}",
+            doc_title=doc_title,
             doc_path=f"agent:{agent_name}:{task_id}",
             source="agent",
-            chunks=[content],
+            chunks=[note],
             extra_payload={
                 "agent_id": self._agent.get("id", ""),
                 "agent_name": agent_name,
                 "task_id": task_id,
+                "note_title": title,
                 "tags": tags,
+                "related": related,
                 "scope": "private",
             },
         )
