@@ -245,6 +245,70 @@ def _call_openai(model: str, api_key: str, system: str, conv: list[dict], tools:
 
 
 # ── Google (Gemini) ──────────────────────────────────────────────────────────
+_GEMINI_TYPES = {"string", "number", "integer", "boolean", "array", "object", "null"}
+
+
+def _gemini_schema(node: Any) -> dict | None:
+    """Coerce a JSON-Schema node into a Gemini-safe schema.
+
+    Gemini's FunctionDeclaration is much stricter than JSON Schema (and than
+    Anthropic/OpenAI): ``type`` must be a single supported value (not a list /
+    union), ``enum`` must be all-strings, and unknown keywords are rejected. MCP
+    connector tools routinely emit list-typed fields and boolean enums, so we
+    rebuild a clean schema with only the keys Gemini accepts and drop what it
+    can't represent. Returns None for an un-coercible node.
+    """
+    if not isinstance(node, dict):
+        return None
+    out: dict = {}
+
+    t = node.get("type")
+    if isinstance(t, list):  # union type -> first supported, non-null wins
+        picks = [x for x in t if x in _GEMINI_TYPES and x != "null"] or [x for x in t if x in _GEMINI_TYPES]
+        t = picks[0] if picks else None
+    if isinstance(t, str) and t in _GEMINI_TYPES:
+        out["type"] = t
+
+    if isinstance(node.get("description"), str):
+        out["description"] = node["description"]
+
+    enum = node.get("enum")
+    if isinstance(enum, list) and enum and all(isinstance(e, str) for e in enum):
+        out["enum"] = enum
+        out.setdefault("type", "string")
+
+    props = node.get("properties")
+    if isinstance(props, dict):
+        cleaned = {k: _gemini_schema(v) for k, v in props.items()}
+        cleaned = {k: v for k, v in cleaned.items() if v}
+        if cleaned:
+            out["properties"] = cleaned
+            out.setdefault("type", "object")
+            req = node.get("required")
+            if isinstance(req, list):
+                kept = [r for r in req if r in cleaned]
+                if kept:
+                    out["required"] = kept
+
+    if out.get("type") == "array" or "items" in node:
+        ci = _gemini_schema(node.get("items")) if isinstance(node.get("items"), dict) else None
+        out["items"] = ci or {"type": "string"}
+        out.setdefault("type", "array")
+
+    if "type" not in out:
+        out["type"] = "object" if "properties" in out else "string"
+    return out
+
+
+def _gemini_parameters(input_schema: Any) -> dict | None:
+    """Top-level parameters for a FunctionDeclaration, or None for no-arg tools."""
+    schema = _gemini_schema(input_schema)
+    if not schema or schema.get("type") != "object" or not schema.get("properties"):
+        # Gemini rejects an object schema with no properties; omit parameters.
+        return None
+    return schema
+
+
 def _call_google(model: str, api_key: str, system: str, conv: list[dict], tools: list[dict]) -> LLMResponse:
     from google import genai
     from google.genai import types
@@ -274,12 +338,18 @@ def _call_google(model: str, api_key: str, system: str, conv: list[dict], tools:
             ]
             contents.append(types.Content(role="user", parts=parts))
 
-    fn_decls = [
-        types.FunctionDeclaration(
-            name=t["name"], description=t.get("description", ""), parameters=t["input_schema"]
-        )
-        for t in tools
-    ]
+    fn_decls = []
+    for t in tools:
+        try:
+            fn_decls.append(
+                types.FunctionDeclaration(
+                    name=t["name"],
+                    description=t.get("description", ""),
+                    parameters=_gemini_parameters(t.get("input_schema")),
+                )
+            )
+        except Exception:  # noqa: BLE001 — skip a tool Gemini can't represent rather than failing the run
+            logger.warning("gemini_tool_schema_skipped tool=%s", t.get("name"), exc_info=True)
     config = types.GenerateContentConfig(
         system_instruction=system,
         tools=[types.Tool(function_declarations=fn_decls)] if fn_decls else None,
