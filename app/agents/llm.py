@@ -88,7 +88,9 @@ def resolve_model_and_key(agent: dict, settings: Any) -> tuple[str, str, str]:
 
     # belleq (managed): pick the platform key that exists.
     anthropic_key = (getattr(settings, "anthropic_api_key", "") or "").strip()
-    if anthropic_key:
+    # Anthropic keys always start with sk-ant-; reject anything else (stale env
+    # vars, placeholder strings, or keys for other providers injected by mistake).
+    if anthropic_key and anthropic_key.startswith("sk-ant-"):
         model = agent.get("model") or DEFAULT_BELLEQ_MODEL
         family = detect_provider(model)
         if family != "anthropic":  # platform Anthropic key only serves claude-*
