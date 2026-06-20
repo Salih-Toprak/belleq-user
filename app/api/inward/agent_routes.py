@@ -39,12 +39,27 @@ async def run_agent(request: Request, payload: dict = Body(default_factory=dict)
     task_id = (payload.get("task") or {}).get("id", "?")
     agent_id = (payload.get("agent") or {}).get("id", "?")
     logger.info("agent_run_started task=%s agent=%s", task_id, agent_id)
-    result = await run_agent_task(
-        payload,
-        pipeline=pipeline,
-        kb_writer=kb_writer,
-        settings=app_config.settings,
-    )
+    try:
+        result = await run_agent_task(
+            payload,
+            pipeline=pipeline,
+            kb_writer=kb_writer,
+            settings=app_config.settings,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Return the real reason as a failed result (HTTP 200) instead of a bare
+        # 500 — the backend persists `result` into the task so it shows on the UI
+        # without anyone having to read container logs.
+        logger.exception("agent_run_error task=%s", task_id)
+        return {
+            "status": "failed",
+            "result": f"Agent run failed: {type(exc).__name__}: {exc}",
+            "final_text": "",
+            "tokens_used": 0,
+            "cost_usd": 0.0,
+            "kb_writes": [],
+            "runs": [],
+        }
     logger.info(
         "agent_run_finished task=%s status=%s cost=%.4f steps=%d",
         task_id, result.get("status"), result.get("cost_usd", 0), len(result.get("runs", [])),

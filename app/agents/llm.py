@@ -70,19 +70,41 @@ def _cost(model: str, in_tok: int, out_tok: int) -> float:
     return (in_tok / 1_000_000) * rate[0] + (out_tok / 1_000_000) * rate[1]
 
 
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+
 def resolve_model_and_key(agent: dict, settings: Any) -> tuple[str, str, str]:
-    """Return (provider_family, model, api_key) for this agent."""
+    """Return (provider_family, model, api_key) for this agent.
+
+    BYOK uses the agent's own key (provider detected from the model prefix).
+    The managed ``belleq`` provider uses whatever platform LLM credential the
+    container actually has — preferring Anthropic, falling back to Gemini (the
+    same key the conversation-extraction pipeline uses) — so a managed agent
+    works regardless of how the deployment configured its extraction backend.
+    """
     if (agent.get("provider") or "belleq") == "byok":
         model = agent.get("model") or DEFAULT_BELLEQ_MODEL
         return detect_provider(model), model, (agent.get("api_key") or "")
-    # belleq: platform Anthropic key, default Sonnet.
-    model = agent.get("model") or DEFAULT_BELLEQ_MODEL
-    family = detect_provider(model)
-    # The platform only holds an Anthropic key; force Anthropic for belleq.
-    if family != "anthropic":
-        model = DEFAULT_BELLEQ_MODEL
-        family = "anthropic"
-    return family, model, (getattr(settings, "anthropic_api_key", "") or "")
+
+    # belleq (managed): pick the platform key that exists.
+    anthropic_key = (getattr(settings, "anthropic_api_key", "") or "").strip()
+    if anthropic_key:
+        model = agent.get("model") or DEFAULT_BELLEQ_MODEL
+        family = detect_provider(model)
+        if family != "anthropic":  # platform Anthropic key only serves claude-*
+            model, family = DEFAULT_BELLEQ_MODEL, "anthropic"
+        return family, model, anthropic_key
+
+    gemini_key = (getattr(settings, "gemini_api_key", "") or "").strip()
+    if gemini_key:
+        model = (getattr(settings, "gemini_model", "") or DEFAULT_GEMINI_MODEL).strip()
+        return "google", model, gemini_key
+
+    raise RuntimeError(
+        "No platform LLM key is configured for the managed 'belleq' provider on "
+        "this context. Set the platform Anthropic or Gemini key, or switch the "
+        "agent to BYOK (Bring your own key) in its settings."
+    )
 
 
 def call_llm(agent: dict, system_prompt: str, conv: list[dict], tools: list[dict], settings: Any) -> LLMResponse:
