@@ -24,6 +24,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_BELLEQ_MODEL = "claude-sonnet-4-6"
+# A solid free OpenRouter model with tool-calling, used when an openrouter agent
+# has no explicit model set.
+DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_TOKENS = 4096
 
 # Best-effort USD pricing per 1M tokens (input, output). Unknown models -> 0.
@@ -82,7 +86,13 @@ def resolve_model_and_key(agent: dict, settings: Any) -> tuple[str, str, str]:
     same key the conversation-extraction pipeline uses) — so a managed agent
     works regardless of how the deployment configured its extraction backend.
     """
-    if (agent.get("provider") or "belleq") == "byok":
+    provider = agent.get("provider") or "belleq"
+    if provider == "openrouter":
+        # OpenRouter is OpenAI-compatible; the model id is its own (e.g.
+        # "meta-llama/llama-3.3-70b-instruct:free"), routed via base_url override.
+        model = agent.get("model") or DEFAULT_OPENROUTER_MODEL
+        return "openrouter", model, (agent.get("api_key") or "")
+    if provider == "byok":
         model = agent.get("model") or DEFAULT_BELLEQ_MODEL
         return detect_provider(model), model, (agent.get("api_key") or "")
 
@@ -114,6 +124,8 @@ def call_llm(agent: dict, system_prompt: str, conv: list[dict], tools: list[dict
     family, model, api_key = resolve_model_and_key(agent, settings)
     if family == "openai":
         return _call_openai(model, api_key, system_prompt, conv, tools)
+    if family == "openrouter":
+        return _call_openai(model, api_key, system_prompt, conv, tools, base_url=OPENROUTER_BASE_URL)
     if family == "google":
         return _call_google(model, api_key, system_prompt, conv, tools)
     return _call_anthropic(model, api_key, system_prompt, conv, tools)
@@ -203,10 +215,22 @@ def _openai_messages(system: str, conv: list[dict]) -> list[dict]:
     return msgs
 
 
-def _call_openai(model: str, api_key: str, system: str, conv: list[dict], tools: list[dict]) -> LLMResponse:
+def _call_openai(
+    model: str,
+    api_key: str,
+    system: str,
+    conv: list[dict],
+    tools: list[dict],
+    base_url: str | None = None,
+) -> LLMResponse:
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key) if api_key else OpenAI()
+    # ``base_url`` switches the same OpenAI-compatible code path to OpenRouter
+    # (or any compatible gateway); None keeps the default OpenAI endpoint.
+    if api_key or base_url:
+        client = OpenAI(api_key=api_key or "", base_url=base_url)
+    else:
+        client = OpenAI()
     tool_specs = [
         {
             "type": "function",
