@@ -61,6 +61,13 @@ class CaptureBody(BaseModel):
     tool: str = ""
 
 
+class AgentWriteBody(BaseModel):
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    scope: str = "shared"
+    source: str = "agent"
+
+
 @router.post("/recall")
 async def kb_recall(
     body: RecallBody,
@@ -142,6 +149,30 @@ async def kb_upload(body: UploadBody, request: Request) -> dict[str, Any]:
         )
     except ExtractionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/agent_write")
+async def kb_agent_write(body: AgentWriteBody, request: Request) -> dict[str, Any]:
+    """Upsert agent-authored content into the KB (used when the backend approves
+    a queued ``scope="shared"`` review item). Reuses the shared KBWriter so it
+    behaves identically to the in-process agent kb_write."""
+    kb_writer = getattr(request.app.state, "kb_writer", None)
+    if kb_writer is None or not kb_writer.available():
+        raise HTTPException(status_code=503, detail="KB writer is unavailable")
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    doc_key = abs(hash(content)) % 10_000_000
+    written = await asyncio.to_thread(
+        kb_writer.write_chunks,
+        doc_id=f"agent-shared-{doc_key}",
+        doc_title="Agent shared note",
+        doc_path=f"agent-shared:{doc_key}",
+        source=body.source or "agent",
+        chunks=[content],
+        extra_payload={"tags": body.tags, "scope": body.scope},
+    )
+    return {"written": written}
 
 
 @router.post("/capture")

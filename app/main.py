@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 import app.config as app_config
 import app.state as state
+from app.api.inward.agent_routes import router as internal_agent_router
 from app.api.inward.config_routes import router as internal_config_router
 from app.api.inward.conversation_routes import router as internal_conversation_router
 from app.api.inward.kb_routes import router as internal_kb_router
@@ -264,4 +265,5 @@ app.include_router(internal_config_router)
 app.include_router(internal_conversation_router)
 app.include_router(internal_kb_router)
 app.include_router(internal_ingestion_router)
+app.include_router(internal_agent_router)
 app.include_router(query_router)
