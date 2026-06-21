@@ -188,8 +188,13 @@ class Toolbox:
 
     # ── setup ────────────────────────────────────────────────────────────────
     async def load_connector_tools(self) -> None:
-        """Discover the agent's permitted connector tools from the aggregated MCP."""
-        if not self._mcp_url or not self._allowed_prefixes:
+        """Load connector tools from the context's aggregated MCP.
+
+        Agents inherit every connector enabled for their context (the aggregated
+        endpoint only exposes those), so we load them all — no per-agent picking.
+        When ``_allowed_prefixes`` is set (the notifier passes specific connector
+        ids) we filter to just those; otherwise we take everything."""
+        if not self._mcp_url:
             return
         try:
             client = self._client()
@@ -197,7 +202,7 @@ class Toolbox:
                 tools = await client.list_tools()
             for t in tools:
                 name = getattr(t, "name", "")
-                if not name.startswith(self._allowed_prefixes):
+                if self._allowed_prefixes and not name.startswith(self._allowed_prefixes):
                     continue
                 schema = getattr(t, "inputSchema", None) or getattr(t, "input_schema", None) or {
                     "type": "object",
