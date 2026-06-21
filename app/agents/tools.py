@@ -89,6 +89,48 @@ KB_WRITE_SPEC = {
     },
 }
 
+WEB_SEARCH_SPEC = {
+    "name": "web_search",
+    "description": (
+        "Search the live web for current, real-world information — competitors, "
+        "people, companies, prices, news, social handles, anything you can't get "
+        "from the knowledge base or a connector. Returns ranked results with the "
+        "page title, URL, and an extracted content snippet. Use this (not your own "
+        "memory) for any external fact, and cite the result URL as the source."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "max_results": {
+                "type": "integer",
+                "description": "How many results to return (default 5, max 10).",
+                "default": 5,
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+WEB_FETCH_SPEC = {
+    "name": "web_fetch",
+    "description": (
+        "Fetch the full clean text of a specific web page by URL (e.g. a result "
+        "from web_search, a company's pricing page, a docs page). Use this to read "
+        "a source in depth before writing a grounded note that cites it."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "The full URL to fetch."},
+        },
+        "required": ["url"],
+    },
+}
+
+TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
+
 
 def _compose_note(title: str, content: str, tags: list[str], related: list[str], source: str) -> str:
     """Assemble a self-contained wiki note (frontmatter-ish header + body).
@@ -121,12 +163,19 @@ class Toolbox:
         agent: dict,
         task: dict,
         connectors_mcp_url: str,
+        tavily_api_key: str = "",
+        step_callback: dict | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._kb_writer = kb_writer
         self._agent = agent
         self._task = task
         self._mcp_url = (connectors_mcp_url or "").strip()
+        self._tavily_key = (tavily_api_key or "").strip()
+        # Live-progress sink (url/token/task_id) the backend handed us; when None
+        # the run still works, the dashboard just sees steps after completion.
+        self._step_callback = step_callback or None
+        self._emitted = 0  # how many steps have been streamed so far
         self._allowed_prefixes = tuple(
             f"{_safe_namespace(cid)}_" for cid in (agent.get("connector_ids") or [])
         )
@@ -173,7 +222,11 @@ class Toolbox:
         return Client(StreamableHttpTransport(url=self._mcp_url))
 
     def specs(self) -> list[dict]:
-        return [KB_READ_SPEC, KB_WRITE_SPEC, *self._connector_specs]
+        web = [WEB_SEARCH_SPEC, WEB_FETCH_SPEC] if self._tavily_key else []
+        return [KB_READ_SPEC, KB_WRITE_SPEC, *web, *self._connector_specs]
+
+    def web_tool_names(self) -> list[str]:
+        return ["web_search", "web_fetch"] if self._tavily_key else []
 
     def connector_tool_names(self) -> list[str]:
         return sorted(self._connector_names)
@@ -197,12 +250,38 @@ class Toolbox:
         """Public hook for the runner to log non-tool steps (e.g. llm_call)."""
         self._log(type_, input_summary, output_summary)
 
+    async def flush_steps(self) -> None:
+        """Stream any steps logged since the last flush to the backend's live-
+        progress sink. Best-effort: failures never interrupt the run (the final
+        result still carries the full step log for authoritative persistence)."""
+        cb = self._step_callback
+        if not cb:
+            return
+        new = self.steps[self._emitted:]
+        if not new:
+            return
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    cb["url"],
+                    json={"task_id": cb.get("task_id"), "token": cb.get("token"), "steps": new},
+                )
+            self._emitted = len(self.steps)
+        except Exception:  # noqa: BLE001 — live progress is best-effort
+            logger.debug("agent_step_flush_failed", exc_info=True)
+
     async def execute(self, name: str, args: dict) -> str:
         """Run one tool call and return its result text (for the LLM tool result)."""
         if name == "kb_read":
             return await self._kb_read(args)
         if name == "kb_write":
             return await self._kb_write(args)
+        if name == "web_search":
+            return await self._web_search(args)
+        if name == "web_fetch":
+            return await self._web_fetch(args)
         if name in self._connector_names:
             return await self._connector_call(name, args)
         msg = f"Unknown tool: {name}"
@@ -289,6 +368,78 @@ class Toolbox:
             msg = f"Connector tool '{name}' failed: {exc}"
             self._log("connector_call", name, msg)
             return msg
+
+    # ── web (Tavily) ─────────────────────────────────────────────────────────
+    async def _web_search(self, args: dict) -> str:
+        query = str(args.get("query", "")).strip()
+        if not query:
+            self._log("web_search", "(empty query)", "error: query required")
+            return "Error: query is required."
+        max_results = max(1, min(int(args.get("max_results", 5) or 5), 10))
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    TAVILY_SEARCH_URL,
+                    json={
+                        "api_key": self._tavily_key,
+                        "query": query,
+                        "max_results": max_results,
+                        "search_depth": "basic",
+                    },
+                )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            msg = f"web_search failed: {exc}"
+            self._log("web_search", query, msg)
+            return msg
+
+        results = [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "content": _truncate(r.get("content", ""), 800),
+            }
+            for r in (data.get("results") or [])
+        ]
+        out = json.dumps(
+            {"answer": data.get("answer"), "results": results}, ensure_ascii=False
+        )
+        self._log("web_search", f"query={query!r} n={max_results}", f"{len(results)} results")
+        return out
+
+    async def _web_fetch(self, args: dict) -> str:
+        url = str(args.get("url", "")).strip()
+        if not url:
+            self._log("web_fetch", "(empty url)", "error: url required")
+            return "Error: url is required."
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(
+                    TAVILY_EXTRACT_URL,
+                    json={"api_key": self._tavily_key, "urls": [url]},
+                )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            msg = f"web_fetch failed: {exc}"
+            self._log("web_fetch", url, msg)
+            return msg
+
+        results = data.get("results") or []
+        content = results[0].get("raw_content", "") if results else ""
+        if not content:
+            failed = data.get("failed_results") or []
+            reason = failed[0].get("error") if failed else "no content extracted"
+            self._log("web_fetch", url, f"empty: {reason}")
+            return f"Could not extract content from {url}: {reason}"
+        out = json.dumps({"url": url, "content": _truncate(content, 12000)}, ensure_ascii=False)
+        self._log("web_fetch", url, f"{len(content)} chars")
+        return out
 
 
 def _extract_mcp_text(result: Any) -> str:

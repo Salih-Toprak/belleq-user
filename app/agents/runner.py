@@ -55,15 +55,20 @@ async def run_agent_task(
         agent=agent,
         task=task,
         connectors_mcp_url=connectors_mcp_url,
+        tavily_api_key=getattr(settings, "tavily_api_key", "") or "",
+        step_callback=payload.get("step_callback"),
     )
     await toolbox.load_connector_tools()
 
-    system_prompt = build_system_prompt(agent, context, toolbox.connector_tool_names())
+    system_prompt = build_system_prompt(
+        agent, context, toolbox.connector_tool_names(), web_tools=toolbox.web_tool_names()
+    )
 
     # Seed the conversation with the instruction + a first KB retrieval.
     kb_result = await pipeline.query(instruction, top_k=INITIAL_KB_TOP_K)
     toolbox.record_step("kb_read", f"initial: {instruction[:200]}",
                         f"{len(kb_result.get('chunks', []))} chunks")
+    await toolbox.flush_steps()
     seed = (
         f"Task:\n{instruction}\n\n"
         f"Relevant knowledge base context:\n{_format_kb_context(kb_result)}"
@@ -87,6 +92,7 @@ async def run_agent_task(
             f"stop={resp.stop_reason} text={(resp.final_text or '')[:200]} "
             f"tool_calls={[t['name'] for t in resp.tool_calls]}",
         )
+        await toolbox.flush_steps()
 
         # Mid-run budget stop (the backend pre-checks; this guards a single
         # expensive run from blowing past the remaining daily budget).
@@ -109,6 +115,7 @@ async def run_agent_task(
             out = await toolbox.execute(call["name"], call.get("input", {}))
             results.append({"id": call["id"], "name": call["name"], "content": out})
         conv.append({"role": "tool", "results": results})
+        await toolbox.flush_steps()
     else:
         # Loop exhausted without an end_turn.
         logger.info("agent_run_max_steps task=%s", task.get("id"))

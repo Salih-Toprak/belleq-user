@@ -98,6 +98,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     extraction_model: str = "claude-haiku-4-5"
 
+    # ── Agent web access (Tavily) ────────────────────────────────
+    # Platform-wide search/fetch key injected at provision time (like the LLM
+    # keys above). When blank, agents simply have no web tools — everything else
+    # keeps working. See app/agents/tools.py (web_search / web_fetch).
+    tavily_api_key: str = ""
+
     # ── Ingestion (documents + MCP captures → queue → worker → KB) ──
     ingestion_enabled: bool = True
     ingestion_sweep_interval_seconds: int = 20
