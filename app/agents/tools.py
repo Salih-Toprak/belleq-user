@@ -176,6 +176,7 @@ class Toolbox:
         # the run still works, the dashboard just sees steps after completion.
         self._step_callback = step_callback or None
         self._emitted = 0  # how many steps have been streamed so far
+        self._cancelled = False  # set when the backend signals a user Stop
         self._allowed_prefixes = tuple(
             f"{_safe_namespace(cid)}_" for cid in (agent.get("connector_ids") or [])
         )
@@ -273,13 +274,22 @@ class Toolbox:
             import httpx
 
             async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(
+                resp = await client.post(
                     cb["url"],
                     json={"task_id": cb.get("task_id"), "token": cb.get("token"), "steps": new},
                 )
             self._emitted = len(self.steps)
+            # The backend tells us here if the user pressed Stop.
+            try:
+                if resp.json().get("cancel"):
+                    self._cancelled = True
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001 — live progress is best-effort
             logger.debug("agent_step_flush_failed", exc_info=True)
+
+    def cancel_requested(self) -> bool:
+        return self._cancelled
 
     async def execute(self, name: str, args: dict) -> str:
         """Run one tool call and return its result text (for the LLM tool result)."""
