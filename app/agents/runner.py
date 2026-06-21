@@ -98,6 +98,12 @@ async def run_agent_task(
         )
         await toolbox.flush_steps()
 
+        # User pressed Stop (signaled back via the step callback).
+        if toolbox.cancel_requested():
+            status = "cancelled"
+            final_text = (final_text + "\n\n").strip() + "\n[Stopped by user]"
+            break
+
         # Mid-run budget stop (the backend pre-checks; this guards a single
         # expensive run from blowing past the remaining daily budget).
         if budget_remaining is not None and total_cost >= float(budget_remaining):
@@ -120,6 +126,10 @@ async def run_agent_task(
             results.append({"id": call["id"], "name": call["name"], "content": out})
         conv.append({"role": "tool", "results": results})
         await toolbox.flush_steps()
+        if toolbox.cancel_requested():
+            status = "cancelled"
+            final_text = (final_text + "\n\n").strip() + "\n[Stopped by user]"
+            break
     else:
         # Loop exhausted without an end_turn.
         logger.info("agent_run_max_steps task=%s", task.get("id"))
