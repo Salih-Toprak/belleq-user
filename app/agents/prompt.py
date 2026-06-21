@@ -36,8 +36,11 @@ How you work with knowledge (follow this every task):
    authoritative over your own prior assumptions. The task message already
    includes an initial KB search; run more targeted kb_read calls as needed.
 
-2. GATHER. If the KB doesn't already answer it, use your connector tools to fetch
-   the missing information, then come back to the KB.
+2. GATHER. If the KB doesn't already answer it, get the missing information from a
+   tool — web_search / web_fetch for anything about the outside world (companies,
+   people, prices, news, social handles, market facts), and your connector tools
+   for systems you're connected to — then come back to the KB. Read real sources;
+   do not answer external questions from memory.
 
 3. RECORD AS YOU LEARN. Whenever you learn or decide something durable, save it
    with kb_write. Do not wait until the end. Write atomic, self-contained notes —
@@ -68,26 +71,58 @@ the KB now contains.\
 """
 
 
-def build_system_prompt(agent: dict, context: dict, connector_tool_names: list[str]) -> str:
+# Hard rule against fabrication. The agent previously invented competitor handles,
+# follower counts, and "posts that performed well" from memory — this forbids that.
+_GROUNDING = """\
+Grounding (this overrides everything above when they conflict):
+
+• NEVER invent facts, numbers, names, dates, quotes, URLs, social handles, or
+  metrics. If you state something about the real world, it must come from a tool
+  result in THIS run (web_search, web_fetch, or a connector) — not from memory or
+  plausible-sounding guesses.
+• For external facts, the Source: line of the note must be the real URL or tool
+  the fact came from. Never write Source: reasoning for a factual claim about the
+  outside world.
+• If you cannot verify something with a tool, say so plainly and write a note
+  tagged "needs_human" describing exactly what's missing — do not fill the gap
+  with a guess. A flagged gap is correct; a confident fabrication is a failure.
+• Distinguish what you verified from what you inferred. Mark inferences as such.\
+"""
+
+
+def build_system_prompt(
+    agent: dict,
+    context: dict,
+    connector_tool_names: list[str],
+    web_tools: list[str] | None = None,
+) -> str:
     """Return the system prompt string for this agent in this context.
 
     ``connector_tool_names`` are the human-facing connector tool names the agent
-    is permitted to use (already filtered to the agent's connectors).
+    is permitted to use (already filtered to the agent's connectors). ``web_tools``
+    are the built-in web tool names available when a platform search key is set.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     name = agent.get("name") or "Agent"
     ctx_name = context.get("name") or "this"
     role = agent.get("role_description") or "Assist with tasks in this workspace."
 
-    if connector_tool_names:
-        tool_lines = [f"- {t}" for t in connector_tool_names]
-    else:
-        tool_lines = ["- (no external connector tools are attached to this agent)"]
+    tool_lines: list[str] = []
     tool_lines.append("- kb_read: search the knowledge base for relevant information")
     tool_lines.append(
         "- kb_write: save a structured, tagged, cross-linked note back to the "
         "knowledge base"
     )
+    if web_tools:
+        tool_lines.append("- web_search: search the live web for current, real-world information")
+        tool_lines.append("- web_fetch: fetch the full text of a specific web page by URL")
+    if connector_tool_names:
+        tool_lines.extend(f"- {t}" for t in connector_tool_names)
+    elif not web_tools:
+        tool_lines.append(
+            "- (no external connector or web tools are attached — you can only use "
+            "the knowledge base; flag anything you cannot verify as needs_human)"
+        )
     tools_block = "\n".join(tool_lines)
 
     return (
@@ -100,5 +135,6 @@ def build_system_prompt(agent: dict, context: dict, connector_tool_names: list[s
         f"You can use these tools:\n"
         f"{tools_block}\n\n"
         f"{_KNOWLEDGE_PROCEDURE}\n\n"
+        f"{_GROUNDING}\n\n"
         f"Today is {today}."
     )
