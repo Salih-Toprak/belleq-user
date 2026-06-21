@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 MAX_STEPS = 16  # hard cap on agentic iterations (safety against tool-loop runaway)
 INITIAL_KB_TOP_K = 12
 
+# Connector name fragments that identify a "send a message to a human" tool, used
+# to deliver run notifications through a Slack/Discord/etc. connector.
+_MESSAGING_HINTS = ("slack", "discord", "telegram", "teams", "mattermost", "message", "send", "post", "chat")
+
 
 def _format_kb_context(result: dict) -> str:
     chunks = result.get("chunks", []) if isinstance(result, dict) else []
@@ -129,3 +133,56 @@ async def run_agent_task(
         "kb_writes": toolbox.kb_writes,
         "runs": toolbox.steps,
     }
+
+
+async def send_notification(
+    payload: dict,
+    *,
+    pipeline: Any,
+    kb_writer: Any,
+    settings: Any,
+) -> dict:
+    """Deliver a run-completion message through the agent's messaging connector.
+
+    Runs a single, tightly-scoped LLM turn whose only tools are the connector's
+    own tools, so it can call the right "send message" tool with the right args
+    (channel, etc.) regardless of which Slack/Discord/… connector is attached.
+    Best-effort: returns {sent: bool} and never raises into the caller.
+    """
+    agent = payload.get("agent", {})
+    message = (payload.get("message") or "").strip()
+    connectors_mcp_url = payload.get("connectors_mcp_url", "")
+    if not message or not agent.get("connector_ids"):
+        return {"sent": False, "reason": "no message or no messaging connector"}
+
+    toolbox = Toolbox(
+        pipeline=pipeline,
+        kb_writer=kb_writer,
+        agent=agent,
+        task={},
+        connectors_mcp_url=connectors_mcp_url,
+    )
+    await toolbox.load_connector_tools()
+    # Only offer tools that look like "send a message to a human".
+    specs = [s for s in toolbox.connector_specs() if any(h in s["name"].lower() for h in _MESSAGING_HINTS)]
+    if not specs:
+        return {"sent": False, "reason": "no messaging tool found on attached connectors"}
+
+    system = (
+        "You deliver a notification. Use one of the available messaging tools to "
+        "send the message below to the user, exactly as written, then stop. Do not "
+        "rephrase it, do not add commentary, and do not call any other tool. If a "
+        "channel or recipient is required, use the connector's default or most "
+        "general one."
+    )
+    conv = [{"role": "user", "text": f"Send this message now:\n\n{message}"}]
+    try:
+        resp = await asyncio.to_thread(call_llm, agent, system, conv, specs, settings)
+        sent = False
+        for call in resp.tool_calls or []:
+            await toolbox.execute(call["name"], call.get("input", {}))
+            sent = True
+        return {"sent": sent}
+    except Exception as exc:  # noqa: BLE001 — notifications are best-effort
+        logger.warning("agent_notify_send_failed err=%s", exc, exc_info=True)
+        return {"sent": False, "reason": str(exc)}

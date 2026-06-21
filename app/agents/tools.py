@@ -231,6 +231,10 @@ class Toolbox:
     def connector_tool_names(self) -> list[str]:
         return sorted(self._connector_names)
 
+    def connector_specs(self) -> list[dict]:
+        """Just the connector tool specs (no kb/web) — used by the notifier."""
+        return list(self._connector_specs)
+
     # ── execution ──────────────────────────────────────────────────────────--
     def _log(self, type_: str, input_summary: str, output_summary: str) -> None:
         self._step_no += 1
@@ -442,17 +446,65 @@ class Toolbox:
         return out
 
 
+# Keys whose values are plumbing, not information — connector/REST APIs (GitHub in
+# particular) bury the useful fields under piles of these. We drop them so the
+# agent (and the run log) keep the substance, not URLs/hashes/internal ids. Any
+# key ending in "_url" is dropped too.
+_NOISE_KEYS = frozenset({
+    "url", "sha", "node_id", "gravatar_id", "_links", "etag",
+    "blob_id", "tree_id", "commit_sha",
+})  # NB: "id"/"number" are kept — the agent may need them for follow-up calls.
+_MAX_LIST_ITEMS = 50      # cap long arrays (e.g. a 300-file directory listing)
+_MAX_STR_LEN = 1500       # cap any single long string value
+_MAX_DEPTH = 8
+
+
+def _prune_json(obj: Any, depth: int = 0) -> Any:
+    """Strip plumbing keys, cap long arrays/strings, and limit depth so a
+    connector result carries information instead of noise."""
+    if depth >= _MAX_DEPTH:
+        return "…"
+    if isinstance(obj, dict):
+        out: dict = {}
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if kl in _NOISE_KEYS or kl.endswith("_url"):
+                continue
+            out[k] = _prune_json(v, depth + 1)
+        return out
+    if isinstance(obj, list):
+        pruned = [_prune_json(x, depth + 1) for x in obj[:_MAX_LIST_ITEMS]]
+        if len(obj) > _MAX_LIST_ITEMS:
+            pruned.append(f"…(+{len(obj) - _MAX_LIST_ITEMS} more items)")
+        return pruned
+    if isinstance(obj, str) and len(obj) > _MAX_STR_LEN:
+        return obj[:_MAX_STR_LEN] + "…"
+    return obj
+
+
+def _clean_text(s: str) -> str:
+    """If a text payload is really JSON, prune it; otherwise return it as-is."""
+    st = s.strip()
+    if st[:1] in ("{", "["):
+        try:
+            return json.dumps(_prune_json(json.loads(st)), ensure_ascii=False)
+        except (ValueError, TypeError):
+            pass
+    return s
+
+
 def _extract_mcp_text(result: Any) -> str:
-    """Pull text out of a FastMCP call_tool result across version shapes."""
+    """Pull text out of a FastMCP call_tool result across version shapes, pruning
+    plumbing fields so we keep the information, not the raw dump."""
     # Newer fastmcp exposes `.data` (structured) and `.content` (blocks).
     data = getattr(result, "data", None)
     if isinstance(data, (str, int, float, bool)):
-        return str(data)
+        return _clean_text(str(data))
     if isinstance(data, (dict, list)):
-        return json.dumps(data, ensure_ascii=False)
+        return json.dumps(_prune_json(data), ensure_ascii=False)
     content = getattr(result, "content", None)
     if content:
         parts = [getattr(b, "text", "") for b in content if getattr(b, "text", "")]
         if parts:
-            return "\n".join(parts)
+            return _clean_text("\n".join(parts))
     return str(result)

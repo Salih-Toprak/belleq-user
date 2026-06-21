@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 import app.config as app_config
-from app.agents.runner import run_agent_task
+from app.agents.runner import run_agent_task, send_notification
 from app.api.deps import require_master
 
 logger = logging.getLogger(__name__)
@@ -65,3 +65,20 @@ async def run_agent(request: Request, payload: dict = Body(default_factory=dict)
         task_id, result.get("status"), result.get("cost_usd", 0), len(result.get("runs", [])),
     )
     return result
+
+
+@router.post("/notify")
+async def notify(request: Request, payload: dict = Body(default_factory=dict)) -> dict[str, Any]:
+    """Deliver a run-completion notification via a messaging connector. Best-effort
+    — always returns 200 so a failed notification never affects the run."""
+    pipeline = getattr(request.app.state, "pipeline", None)
+    kb_writer = getattr(request.app.state, "kb_writer", None)
+    if pipeline is None or kb_writer is None:
+        return {"sent": False, "reason": "runtime unavailable"}
+    try:
+        return await send_notification(
+            payload, pipeline=pipeline, kb_writer=kb_writer, settings=app_config.settings
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agent_notify_error err=%s", exc, exc_info=True)
+        return {"sent": False, "reason": str(exc)}
