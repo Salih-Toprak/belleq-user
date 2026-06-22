@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from app.agents.llm import call_llm
@@ -20,6 +21,10 @@ from app.agents.tools import Toolbox
 logger = logging.getLogger(__name__)
 
 MAX_STEPS = 16  # hard cap on agentic iterations (safety against tool-loop runaway)
+# Wall-clock budget: stop the loop before the backend's 600s HTTP timeout so a
+# long run returns a result instead of the backend timing out (ReadTimeout) and
+# orphaning the container mid-run.
+MAX_RUN_SECONDS = 480
 INITIAL_KB_TOP_K = 12
 
 # Connector name fragments that identify a "send a message to a human" tool, used
@@ -84,8 +89,14 @@ async def run_agent_task(
     total_cost = 0.0
     final_text = ""
     status = "completed"
+    started = time.monotonic()
 
     for _ in range(MAX_STEPS):
+        # Wall-clock stop: wrap up before the backend's HTTP timeout.
+        if time.monotonic() - started > MAX_RUN_SECONDS:
+            status = "completed"
+            final_text = (final_text + "\n\n").strip() + "\n[Stopped: run time limit reached]"
+            break
         resp = await asyncio.to_thread(call_llm, agent, system_prompt, conv, tool_specs, settings)
         total_tokens += resp.tokens_used
         total_cost += resp.cost_usd
