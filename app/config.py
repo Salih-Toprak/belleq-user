@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     extraction_model: str = "claude-haiku-4-5"
 
+    # ── Agent execution ──────────────────────────────────────────
+    # Max agentic loop iterations — a runaway-loop safety net, not a feature cap.
+    # High by default so large tasks finish; daily budget bounds cost separately.
+    agent_max_steps: int = 100
+
     # ── Agent web access (Tavily) ────────────────────────────────
     # Platform-wide search/fetch key injected at provision time (like the LLM
     # keys above). When blank, agents simply have no web tools — everything else
