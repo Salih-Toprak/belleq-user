@@ -19,7 +19,10 @@ from app.agents.tools import Toolbox
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 16  # hard cap on agentic iterations (safety against tool-loop runaway)
+# Hard cap on agentic iterations — only a runaway-loop safety net, NOT a feature
+# limit. Set high so big tasks (e.g. reading dozens of files) finish; cost is
+# bounded separately by the agent's daily budget. Override via AGENT_MAX_STEPS.
+DEFAULT_MAX_STEPS = 100
 INITIAL_KB_TOP_K = 12
 
 # Connector name fragments that identify a "send a message to a human" tool, used
@@ -84,8 +87,9 @@ async def run_agent_task(
     total_cost = 0.0
     final_text = ""
     status = "completed"
+    max_steps = int(getattr(settings, "agent_max_steps", DEFAULT_MAX_STEPS) or DEFAULT_MAX_STEPS)
 
-    for _ in range(MAX_STEPS):
+    for _ in range(max_steps):
         resp = await asyncio.to_thread(call_llm, agent, system_prompt, conv, tool_specs, settings)
         total_tokens += resp.tokens_used
         total_cost += resp.cost_usd
@@ -131,8 +135,13 @@ async def run_agent_task(
             final_text = (final_text + "\n\n").strip() + "\n[Stopped by user]"
             break
     else:
-        # Loop exhausted without an end_turn.
-        logger.info("agent_run_max_steps task=%s", task.get("id"))
+        # Loop exhausted without the agent finishing — make it explicit instead of
+        # returning a mid-thought message that looks like a silent stop.
+        logger.info("agent_run_max_steps task=%s steps=%s", task.get("id"), max_steps)
+        final_text = (final_text + "\n\n").strip() + (
+            f"\n[Reached the {max_steps}-step limit before finishing. "
+            f"Raise AGENT_MAX_STEPS or split the task into smaller runs.]"
+        )
 
     return {
         "status": status,
