@@ -153,3 +153,18 @@ class VectorDBAdapter(ABC):
         Returns list of {"id": str, "payload": dict}
         Used for admin listing and health checks.
         """
+
+    async def set_payload_by_filter(
+        self,
+        collection_name: str,
+        filters: dict | None,
+        payload: dict,
+    ) -> int:
+        """
+        Merge ``payload`` keys into every point matching the normalized filter.
+        Used by retention to flag docs archived/restored without re-embedding.
+        Returns matched-point count (best effort). Optional per backend.
+        """
+        raise VectorDBError(
+            "set_payload_by_filter not supported", self.backend_name
+        )

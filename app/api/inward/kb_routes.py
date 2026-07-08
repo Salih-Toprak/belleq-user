@@ -86,6 +86,16 @@ async def kb_query(
     return await pipeline.query(body.query)
 
 
+def _touch_activity(request: Request) -> None:
+    """Best-effort: writes also mark today an active day for retention."""
+    tracker = getattr(request.app.state, "activity_tracker", None)
+    if tracker is not None:
+        try:
+            tracker.mark_active()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @router.post("/record")
 async def kb_record(body: RecordBody, request: Request) -> dict[str, Any]:
     """Save a verbatim exchange (mirror of record_exchange)."""
@@ -98,6 +108,7 @@ async def kb_record(body: RecordBody, request: Request) -> dict[str, Any]:
         body.assistant_message,
         body.conversation_id or None,
     )
+    await asyncio.to_thread(_touch_activity, request)
     return ack if isinstance(ack, dict) else {"recorded": True}
 
 
@@ -144,11 +155,13 @@ async def kb_upload(body: UploadBody, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=413, detail=f"File exceeds the {max_mb} MB limit")
 
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             enqueue_document, queue, raw=raw, filename=filename, title=body.title
         )
     except ExtractionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    await asyncio.to_thread(_touch_activity, request)
+    return result
 
 
 @router.post("/agent_write")

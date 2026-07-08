@@ -76,6 +76,9 @@ async def recent_facts(
         chunks.sort(key=lambda c: (c.get("payload") or {}).get("chunk_index", 0))
         for c in chunks:
             payload = c.get("payload") or {}
+            # Retention-archived facts stay out of recall until restored.
+            if payload.get("archived") is True:
+                continue
             text = (payload.get("text") or "").strip()
             if not text:
                 continue
