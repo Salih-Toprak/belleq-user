@@ -1,8 +1,10 @@
 # belleq-user
 
-Per-user **retrieval-as-a-service** container for the [Belleq](https://github.com/sstprk) platform. It runs the **rag-wiki** lifecycle system and returns relevant document chunks to whoever calls it. It has no LLM, no answer generation, no use-case-specific logic.
+Per-context **retrieval-as-a-service** container for the [Belleq](https://github.com/sstprk) platform. It runs the **rag-wiki** lifecycle system and returns relevant document chunks to whoever calls it.
 
-Each deployment runs **one** `USER_ID`. All rag-wiki lifecycle state is stored under `/app/data/{USER_ID}/` on disk (SQLite + JSON overrides) and survives restarts.
+Each deployment runs **one** `USER_ID` (one context). All rag-wiki lifecycle state is stored under `/app/data/{USER_ID}/` on disk (SQLite + JSON overrides) and survives restarts.
+
+> **Current architecture note (July 2026):** the line above — "no LLM, no answer generation" — described this container's role in the original retrieval-only design. That's still true for the query/retrieval path (`/query`), but this container **also now runs the agent-orchestration (L5) execution loop** (`app/agents/{runner,prompt,tools,llm}.py`): when the platform backend triggers a run, this is where the agent's step loop (KB read, connector call, LLM call, KB write) actually executes, because this is where the context's KB, connectors, and chosen LLM are all directly reachable. It also runs conversation capture/extraction (`app/conversation/`) — closing idle sessions and routing them to fact extraction (Gemini by default, Claude Haiku if configured) or skip. See [Agent execution](#agent-execution) and [Conversation capture](#conversation-capture) below.
 
 ---
 
@@ -98,6 +100,28 @@ MCP shares the **same** `QueryPipeline` instance as the HTTP API (no duplicate p
 
 ---
 
+## Agent execution
+
+Inward-only (`X-Master-Key`), called by belleq-master's [agent bridge](../belleq-master/README.md#agent-bridge) on the platform backend's behalf.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/internal/agents/run` | POST | Run an agent's step loop now (kb_read / connector_call / llm_call / kb_write), return result + step log + cost. |
+| `/internal/agents/notify` | POST | Deliver a notification to an agent (e.g. an inbound Telegram message for two-way chat). |
+
+## Conversation capture
+
+Inward-only. Backs the dashboard's conversation-extraction card and the "Flush to KB now" button (proxied through belleq-master's `/master/conversations/*`).
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/internal/conversations/stats` | GET | Session/exchange/status counters for this context. |
+| `/internal/conversations/flush` | POST | Force-close open sessions and run extraction immediately. |
+| `/internal/conversations` | GET | List captured sessions. |
+| `/internal/conversations/{session_id}` | GET | One session's turns. |
+
+`build_extractor()` selects the extractor from `EXTRACTION_BACKEND`: **Gemini (`gemini-2.5-flash`, `GeminiFactExtractor`) is the default**; setting it to `anthropic`/`claude`/`haiku` switches to `HaikuFactExtractor` (Claude Haiku) instead. Disabling `conversation_extraction_enabled` swaps in a `NoopFactExtractor` that marks sessions extracted without writing anything.
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -191,6 +215,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `app/lifecycle/` — rag-wiki stores, retriever, APScheduler decay job
 - `app/query/` — retrieval pipeline (chunks only, no LLM)
 - `app/mcp/` — FastMCP SSE server
-- `app/api/` — inward + outward routers
+- `app/agents/` — L5 agent execution loop: `runner.py` (step loop), `prompt.py`, `tools.py`, `llm.py` (provider-agnostic router: Anthropic/OpenAI/Google/OpenRouter)
+- `app/conversation/` — session capture, idle-gap close, `extraction.py` (fact extraction: Gemini by default, Claude Haiku alternate via `EXTRACTION_BACKEND`)
+- `app/api/` — inward + outward routers (includes `inward/agent_routes.py`, `inward/conversation_routes.py`)
 
 Master repo path (local): `../belleq-master`.
