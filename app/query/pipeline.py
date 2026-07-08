@@ -23,16 +23,24 @@ class QueryPipeline:
         global_store: Any,
         settings: "Settings",
         capture: Any = None,
+        activity: Any = None,
     ) -> None:
         self._user_id = user_id
         self._lifecycle = lifecycle_retriever
         self._global_store = global_store
         self._settings = settings
         self._capture = capture
+        self._activity = activity  # retention ActivityTracker (optional)
 
     def bind_settings(self, settings: "Settings") -> None:
         """runtime_config güncellemelerinde ayar referansını yeniler."""
         self._settings = settings
+
+    def _mark_activity(self, fetched_doc_ids: list[str]) -> None:
+        """Sync helper (runs in a thread): bump the retention activity clock."""
+        self._activity.mark_active()
+        if fetched_doc_ids:
+            self._activity.record_fetch(fetched_doc_ids)
 
     async def query(
         self,
@@ -69,6 +77,21 @@ class QueryPipeline:
                     self._global_store.increment_fetch(str(doc_id), self._user_id)
         except Exception:
             logger.warning("increment_fetch_failed", exc_info=True)
+
+        # Retention clock: this query marks today an active day, and every
+        # fetched doc's staleness clock restarts.
+        if self._activity is not None:
+            try:
+                import asyncio as _asyncio
+
+                fetched = [
+                    str((d.metadata or {}).get("doc_id"))
+                    for d in docs
+                    if (d.metadata or {}).get("doc_id")
+                ]
+                await _asyncio.to_thread(self._mark_activity, fetched)
+            except Exception:
+                logger.debug("activity_track_failed", exc_info=True)
 
         chunks = []
         for doc in docs:

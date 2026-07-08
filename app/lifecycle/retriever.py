@@ -95,11 +95,13 @@ class VectorDBRetrieverAdapter(BaseRetriever):
             logger.exception("vector_retriever_embed_failed")
             return []
         try:
+            # Archived (retention-stale) docs never surface in retrieval; they
+            # remain in Qdrant and are restorable from the dashboard.
             hits = await vd.search(
                 collection_name=collection,
                 query_vector=qvec,
                 top_k=top_k,
-                filters=None,
+                filters={"must_not": [{"field": "archived", "value": True}]},
             )
         except Exception:
             logger.exception("vector_retriever_search_failed")

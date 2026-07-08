@@ -248,6 +248,27 @@ class QdrantAdapter(VectorDBAdapter):
         except Exception as e:  # noqa: BLE001
             raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
 
+    async def set_payload_by_filter(
+        self,
+        collection_name: str,
+        filters: dict | None,
+        payload: dict,
+    ) -> int:
+        """Merge payload keys into all points matching the normalized filter."""
+        flt = filter_utils.build_qdrant_filter(filters)
+        try:
+            matched = await self.count(collection_name, filters)
+            await self._client.set_payload(
+                collection_name=collection_name,
+                payload=payload,
+                points=qmodels.FilterSelector(filter=flt),
+            )
+            return matched
+        except VectorDBError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
+
     async def scroll(
         self,
         collection_name: str,

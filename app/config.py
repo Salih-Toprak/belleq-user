@@ -18,6 +18,10 @@ RUNTIME_CONFIG_KEYS = frozenset(
         "rag_wiki_fetch_threshold",
         "rag_wiki_top_k",
         "mcp_enabled",
+        "retention_enabled",
+        "retention_archive_after_days",
+        "retention_purge_enabled",
+        "retention_purge_after_days",
     }
 )
 
@@ -70,6 +74,17 @@ class Settings(BaseSettings):
     rag_wiki_fetch_threshold: int = 3
     rag_wiki_decay_interval_hours: int = 24
     rag_wiki_top_k: int = 5
+
+    # ── Retention (stale-doc archive/purge) ──────────────────────
+    # The staleness clock counts ACTIVE days (days this context was actually
+    # used), never calendar days — an absent user's documents never age.
+    # Archive is soft (hidden from retrieval, restorable); purge physically
+    # deletes archived docs and is opt-in.
+    retention_enabled: bool = True
+    retention_archive_after_days: int = 45   # active days without a fetch
+    retention_purge_enabled: bool = False
+    retention_purge_after_days: int = 60     # active days after archiving
+    retention_sweep_interval_hours: int = 24
 
     # ── Conversation capture & archive ───────────────────────────
     # The conversation history subsystem records user/assistant exchanges
@@ -142,6 +157,11 @@ class Settings(BaseSettings):
     def ingestion_db_path(self) -> str:
         """Separate SQLite file for the ingestion queue."""
         return f"{self.data_dir}/{self.user_id}/ingestion.db"
+
+    @property
+    def retention_db_path(self) -> str:
+        """Separate SQLite file for retention activity tracking."""
+        return f"{self.data_dir}/{self.user_id}/retention.db"
 
     @property
     def db_url(self) -> str:

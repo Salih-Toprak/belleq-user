@@ -18,6 +18,7 @@ from app.api.inward.kb_routes import router as internal_kb_router
 from app.api.inward.ingestion_routes import router as internal_ingestion_router
 from app.api.inward.docs_routes import router as internal_docs_router
 from app.api.inward.health_routes import router as internal_health_router
+from app.api.inward.retention_routes import router as internal_retention_router
 from app.api.outward.query_routes import router as query_router
 from app.config import settings
 from app.conversation.capture import ConversationCapture
@@ -30,6 +31,7 @@ from app.ingestion.scheduler import IngestionScheduler
 from app.ingestion.worker import IngestionWorker
 from app.embeddings.factory import get_embedding_adapter
 from app.lifecycle.decay_scheduler import DecayScheduler
+from app.lifecycle.retention import ActivityTracker, RetentionScheduler, RetentionSweeper
 from app.lifecycle.retriever import LifecycleRetriever
 from app.lifecycle.store import init_stores
 from app.mcp.server import build_mcp_server
@@ -116,12 +118,21 @@ async def lifespan(app: FastAPI):
         app.state.conversation_capture = conversation_capture
         logger.info("Conversation capture enabled: %s", settings.conversations_db_path)
 
+    # ── Retention (stale-doc archive/purge, activity-gated) ─────
+    try:
+        activity_tracker = ActivityTracker(settings.retention_db_path)
+    except Exception:  # noqa: BLE001 — retention must never block startup
+        logger.warning("activity_tracker_init_failed", exc_info=True)
+        activity_tracker = None
+    app.state.activity_tracker = activity_tracker
+
     pipeline = QueryPipeline(
         user_id=settings.user_id,
         lifecycle_retriever=retriever,
         global_store=global_store,
         settings=settings,
         capture=conversation_capture,
+        activity=activity_tracker,
     )
     state._pipeline = pipeline
     app.state.pipeline = pipeline
@@ -138,6 +149,22 @@ async def lifespan(app: FastAPI):
     )
     decay.start()
     app.state.decay_scheduler = decay
+
+    retention_scheduler = None
+    if state._vectordb is not None and activity_tracker is not None:
+        retention_sweeper = RetentionSweeper(
+            vectordb=state._vectordb,
+            collection_name=retriever.collection_name,
+            tracker=activity_tracker,
+        )
+        app.state.retention_sweeper = retention_sweeper
+        retention_scheduler = RetentionScheduler(
+            retention_sweeper,
+            interval_hours=settings.retention_sweep_interval_hours,
+        )
+        retention_scheduler.start()
+    else:
+        app.state.retention_sweeper = None
 
     # Shared KB writer (embed → Qdrant → GlobalDocStore). Used by both the
     # conversation extraction worker and the document/MCP ingestion worker.
@@ -202,6 +229,8 @@ async def lifespan(app: FastAPI):
     yield
 
     app.state.decay_scheduler.stop()
+    if retention_scheduler is not None:
+        retention_scheduler.stop()
     if session_manager is not None:
         session_manager.stop()
     if ingestion_scheduler is not None:
@@ -262,6 +291,7 @@ async def public_health() -> dict:
 app.include_router(internal_health_router)
 app.include_router(internal_docs_router)
 app.include_router(internal_config_router)
+app.include_router(internal_retention_router)
 app.include_router(internal_conversation_router)
 app.include_router(internal_kb_router)
 app.include_router(internal_ingestion_router)

@@ -46,6 +46,10 @@ def _public_config_dict(s: Any) -> dict[str, Any]:
         "rag_wiki_fetch_threshold": s.rag_wiki_fetch_threshold,
         "rag_wiki_decay_interval_hours": s.rag_wiki_decay_interval_hours,
         "rag_wiki_top_k": s.rag_wiki_top_k,
+        "retention_enabled": s.retention_enabled,
+        "retention_archive_after_days": s.retention_archive_after_days,
+        "retention_purge_enabled": s.retention_purge_enabled,
+        "retention_purge_after_days": s.retention_purge_after_days,
         "mcp_enabled": s.mcp_enabled,
         "mcp_server_name": s.mcp_server_name or f"belleq-{s.user_id}",
         "data_dir": s.data_dir,
@@ -64,6 +68,10 @@ class RuntimePatch(BaseModel):
     rag_wiki_fetch_threshold: int | None = Field(default=None, ge=1)
     rag_wiki_top_k: int | None = Field(default=None, ge=1)
     mcp_enabled: bool | None = None
+    retention_enabled: bool | None = None
+    retention_archive_after_days: int | None = Field(default=None, ge=1, le=3650)
+    retention_purge_enabled: bool | None = None
+    retention_purge_after_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 @router.patch("")
@@ -78,6 +86,14 @@ async def patch_config(body: RuntimePatch, request: Request) -> dict[str, Any]:
         updates["rag_wiki_top_k"] = body.rag_wiki_top_k
     if body.mcp_enabled is not None:
         updates["mcp_enabled"] = body.mcp_enabled
+    if body.retention_enabled is not None:
+        updates["retention_enabled"] = body.retention_enabled
+    if body.retention_archive_after_days is not None:
+        updates["retention_archive_after_days"] = body.retention_archive_after_days
+    if body.retention_purge_enabled is not None:
+        updates["retention_purge_enabled"] = body.retention_purge_enabled
+    if body.retention_purge_after_days is not None:
+        updates["retention_purge_after_days"] = body.retention_purge_after_days
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update")
     new_settings = cur.model_copy(update=updates)
