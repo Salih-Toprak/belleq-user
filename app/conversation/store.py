@@ -73,6 +73,10 @@ class ConversationStore:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # Wait out a transient writer/checkpoint lock instead of raising
+            # "database is locked" — that error is a known cause of a
+            # record_exchange silently returning recorded:false.
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_sessions (

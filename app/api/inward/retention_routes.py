@@ -64,8 +64,20 @@ async def retention_status(request: Request) -> dict[str, Any]:
         "sweep_interval_hours": s.retention_sweep_interval_hours,
         "active_days_total": tracker.total_active_days() if tracker else 0,
         "archived_count": archived_count,
+        "pending_release_bytes": tracker.pending_release() if tracker else 0,
         "last_sweep": sweeper.last_sweep() if sweeper else None,
     }
+
+
+@router.post("/claim-release")
+async def retention_claim_release(request: Request) -> dict[str, Any]:
+    """Atomically hand the backend the bytes freed by purges since the last
+    claim (then reset the counter). The backend releases them from the usage
+    storage meter; only it can touch that meter, and the container can't reach
+    it directly. Safe to call repeatedly — returns 0 when nothing is pending."""
+    tracker = getattr(request.app.state, "activity_tracker", None)
+    claimed = tracker.claim_pending_release() if tracker else 0
+    return {"bytes": int(claimed)}
 
 
 @router.get("/archived")

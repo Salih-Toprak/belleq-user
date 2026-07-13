@@ -156,6 +156,8 @@ async def lifespan(app: FastAPI):
             vectordb=state._vectordb,
             collection_name=retriever.collection_name,
             tracker=activity_tracker,
+            state_store=state_store,
+            user_id=settings.user_id,
         )
         app.state.retention_sweeper = retention_sweeper
         retention_scheduler = RetentionScheduler(

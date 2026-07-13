@@ -24,15 +24,28 @@ def enqueue_document(
     filename: str,
     content_type: str = "",
     title: str = "",
+    replace: bool = False,
 ) -> dict[str, Any]:
-    """Extract text from an uploaded file and queue it. Raises ExtractionError."""
+    """Extract text from an uploaded file and queue it. Raises ExtractionError.
+
+    ``replace=True`` treats the document as an update of an existing one with
+    the same identity (its filename, else title): the doc id is derived from
+    that identity instead of the content, so re-uploading an edited version
+    lands on the same doc and the worker replaces its chunks in place — no more
+    old + new copies of the same document lingering side by side. Default
+    (``False``) keeps content-addressed behaviour (identical content dedups).
+    """
     text = extract_text(raw, filename, content_type).strip()
     if not text:
         from app.ingestion.extractors import ExtractionError
         raise ExtractionError(f"No text extracted from {filename}")
 
     chash = content_hash(text)
-    doc_id = f"doc-{chash[:16]}"
+    if replace:
+        identity = (filename or title or chash).strip().lower()
+        doc_id = f"doc-{content_hash(identity)[:16]}"
+    else:
+        doc_id = f"doc-{chash[:16]}"
     display = (title or filename or doc_id).strip()
     job_id, created = queue.enqueue(
         KIND_DOCUMENT,
@@ -42,6 +55,7 @@ def enqueue_document(
             "doc_title": display,
             "doc_path": f"upload:{filename or doc_id}",
             "source": "document",
+            "replace": bool(replace),
             "extra": {"filename": filename},
         },
         chash,
@@ -51,6 +65,7 @@ def enqueue_document(
         "doc_id": doc_id,
         "queued": created,
         "duplicate": not created,
+        "replaced": bool(replace),
         "chars": len(text),
         "title": display,
     }

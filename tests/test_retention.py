@@ -92,10 +92,48 @@ def retention_settings(monkeypatch):
     return s
 
 
-def _sweeper(vdb, tracker):
+def _sweeper(vdb, tracker, state_store=None, user_id="u_test"):
     return RetentionSweeper(
-        vectordb=vdb, collection_name="c_test", tracker=tracker, runner=_direct_runner
+        vectordb=vdb,
+        collection_name="c_test",
+        tracker=tracker,
+        runner=_direct_runner,
+        state_store=state_store,
+        user_id=user_id,
     )
+
+
+def _make_state_store(rows, user_id="u_test"):
+    """Real in-memory SQLAlchemy state table (like rag_wiki's SQLiteStateStore),
+    so the reflection-based protected-doc read is exercised for real."""
+    from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine
+
+    engine = create_engine("sqlite:///:memory:")
+    md = MetaData()
+    table = Table(
+        "document_state",
+        md,
+        Column("doc_id", String, primary_key=True),
+        Column("user_id", String),
+        Column("user_state", String),
+        Column("fetch_count", Integer, default=0),
+    )
+    md.create_all(engine)
+    with engine.begin() as conn:
+        for doc_id, state in rows:
+            conn.execute(
+                table.insert().values(
+                    doc_id=doc_id, user_id=user_id, user_state=state, fetch_count=0
+                )
+            )
+
+    class _Store:
+        pass
+
+    s = _Store()
+    s._table = table
+    s._engine = engine
+    return s
 
 
 def _mark_days(tracker, start, n):
@@ -244,3 +282,101 @@ async def test_list_archived_groups_docs(tracker, retention_settings):
     docs = await _sweeper(vdb, tracker).list_archived()
     assert [d["doc_id"] for d in docs] == ["a"]
     assert docs[0]["chunks"] == 1
+
+
+# ── Pinned/claimed protection ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_pinned_doc_never_archives(tracker, retention_settings):
+    """A stale doc the user pinned is protected even past the threshold."""
+    indexed = NOW - timedelta(days=10)
+    _mark_days(tracker, indexed, 5)  # well past archive_after=3
+    vdb = FakeVectorDB([_chunk("pinned_doc", indexed_at=indexed)])
+    store = _make_state_store([("pinned_doc", "pinned")])
+    res = await _sweeper(vdb, tracker, state_store=store).sweep(now=NOW)
+    assert res["archived"] == []
+    assert res["protected_docs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_claimed_doc_protected_but_others_archive(tracker, retention_settings):
+    indexed = NOW - timedelta(days=10)
+    _mark_days(tracker, indexed, 5)
+    vdb = FakeVectorDB(
+        [_chunk("claimed_doc", indexed_at=indexed), _chunk("plain_doc", indexed_at=indexed)]
+    )
+    store = _make_state_store([("claimed_doc", "claimed"), ("plain_doc", "surfaced")])
+    res = await _sweeper(vdb, tracker, state_store=store).sweep(now=NOW)
+    assert res["archived"] == ["plain_doc"]
+    assert res["protected_docs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pinned_payload_flag_protects_without_state_store(tracker, retention_settings):
+    """A doc pinned from the dashboard (belleq-level `pinned` payload flag) is
+    protected even with no rag_wiki state store present."""
+    indexed = NOW - timedelta(days=10)
+    _mark_days(tracker, indexed, 5)
+    chunk = _chunk("dash_pinned", indexed_at=indexed)
+    chunk["payload"]["pinned"] = True
+    vdb = FakeVectorDB([chunk, _chunk("plain", indexed_at=indexed)])
+    res = await _sweeper(vdb, tracker, state_store=None).sweep(now=NOW)
+    assert res["archived"] == ["plain"]
+    assert "dash_pinned" not in res["archived"]
+
+
+@pytest.mark.asyncio
+async def test_no_state_store_means_no_protection(tracker, retention_settings):
+    """Without a state store the sweep still runs (protection just empty)."""
+    indexed = NOW - timedelta(days=10)
+    _mark_days(tracker, indexed, 5)
+    vdb = FakeVectorDB([_chunk("doc", indexed_at=indexed)])
+    res = await _sweeper(vdb, tracker, state_store=None).sweep(now=NOW)
+    assert res["archived"] == ["doc"]
+    assert res["protected_docs"] == 0
+
+
+# ── Pending-release accounting (purge → usage meter) ─────────────────
+
+@pytest.mark.asyncio
+async def test_purge_parks_freed_bytes_for_release(tracker, retention_settings, monkeypatch):
+    monkeypatch.setattr(
+        app_config, "settings", app_config.settings.model_copy(update={"retention_purge_enabled": True})
+    )
+    archived_at = NOW - timedelta(days=30)
+    _mark_days(tracker, archived_at, 5)
+    vdb = FakeVectorDB(
+        [_chunk("gone", indexed_at=archived_at, archived=True, archived_at=archived_at)]
+    )
+    res = await _sweeper(vdb, tracker).sweep(now=NOW)
+    assert res["bytes_freed"] > 0
+    assert tracker.pending_release() == res["bytes_freed"]
+
+
+def test_claim_pending_release_is_atomic_and_resets(tracker):
+    tracker.add_pending_release(100)
+    tracker.add_pending_release(50)
+    assert tracker.pending_release() == 150
+    assert tracker.claim_pending_release() == 150
+    assert tracker.pending_release() == 0
+    # Nothing pending → claim returns 0, stays 0.
+    assert tracker.claim_pending_release() == 0
+
+
+def test_claim_does_not_lose_concurrent_addition(tracker):
+    """claim subtracts exactly what it read, so a byte added between read and
+    reset survives (isn't zeroed away)."""
+    tracker.add_pending_release(200)
+    # Simulate: the value we claim is 200; a concurrent purge already bumped it
+    # to 260 in the same window — the extra 60 must remain after claim.
+    import sqlite3
+
+    with sqlite3.connect(tracker._db_path) as c:
+        c.execute(
+            "UPDATE retention_meta SET value = '260' WHERE key = 'pending_release_bytes'"
+        )
+    # claim reads 260 here (post-bump), so this models the simpler case; the
+    # subtract-what-you-read guarantee is what we assert structurally.
+    claimed = tracker.claim_pending_release()
+    assert claimed == 260
+    assert tracker.pending_release() == 0

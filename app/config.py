@@ -93,8 +93,12 @@ class Settings(BaseSettings):
     # sessions to fact extraction (>= min_exchanges) or skip (< min_exchanges).
     conversation_capture_enabled: bool = True
     conversation_min_exchanges: int = 10
-    conversation_session_idle_minutes: int = 30
-    conversation_sweep_interval_minutes: int = 10
+    # Auto-flush cadence: a session is closed + extracted after this much
+    # inactivity, checked this often. Tightened so saved conversations land in
+    # the KB automatically within ~15 min of going quiet, rather than ~40 —
+    # users shouldn't need to call flush themselves.
+    conversation_session_idle_minutes: int = 15
+    conversation_sweep_interval_minutes: int = 5
     # How many recent saved facts `recall_context` returns by default (the
     # zero-instruction "load my situation" primer the connected AI calls first).
     recall_default_limit: int = 10
