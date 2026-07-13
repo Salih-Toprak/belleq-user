@@ -52,6 +52,7 @@ class UploadBody(BaseModel):
     content_base64: str = ""
     text: str = ""
     title: str = ""
+    replace: bool = False
 
 
 class CaptureBody(BaseModel):
@@ -156,7 +157,12 @@ async def kb_upload(body: UploadBody, request: Request) -> dict[str, Any]:
 
     try:
         result = await asyncio.to_thread(
-            enqueue_document, queue, raw=raw, filename=filename, title=body.title
+            enqueue_document,
+            queue,
+            raw=raw,
+            filename=filename,
+            title=body.title,
+            replace=body.replace,
         )
     except ExtractionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

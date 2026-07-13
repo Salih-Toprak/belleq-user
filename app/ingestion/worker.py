@@ -63,4 +63,5 @@ class IngestionWorker:
             chunks=chunks,
             department=p.get("department") or "general",
             extra_payload=p.get("extra") or {},
+            replace=bool(p.get("replace")),
         )

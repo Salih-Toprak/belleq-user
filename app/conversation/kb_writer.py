@@ -72,6 +72,7 @@ class KBWriter:
         chunks: list[str],
         department: str = "general",
         extra_payload: dict[str, Any] | None = None,
+        replace: bool = False,
     ) -> int:
         """Embed + upsert a document (one or more chunks) into the KB.
 
@@ -129,6 +130,17 @@ class KBWriter:
         #    write, so the upsert would 404 without this.
         loop = _get_persistent_loop()
         asyncio.run_coroutine_threadsafe(self._ensure_collection(), loop).result(timeout=30)
+        # Replace-in-place: drop every existing chunk of this doc before writing
+        # the new version, so an edited re-upload doesn't leave stale chunks
+        # behind (deterministic point ids only overwrite matching indices — a
+        # shorter new version would otherwise keep the old tail).
+        if replace:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._vectordb.delete_by_doc_id(self._collection, doc_id), loop
+                ).result(timeout=30)
+            except Exception:  # noqa: BLE001 — a failed delete shouldn't block the write
+                logger.warning("kb_replace_delete_failed doc_id=%s", doc_id, exc_info=True)
         fut = asyncio.run_coroutine_threadsafe(
             self._vectordb.upsert(self._collection, points), loop
         )

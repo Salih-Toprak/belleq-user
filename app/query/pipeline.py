@@ -93,6 +93,10 @@ class QueryPipeline:
             except Exception:
                 logger.debug("activity_track_failed", exc_info=True)
 
+        # Keep the result compact: the connected AI only needs the text plus a
+        # few locating fields. We previously also inlined the entire raw payload
+        # under `metadata`, which duplicated every field and roughly doubled the
+        # response size for no benefit — dropped.
         chunks = []
         for doc in docs:
             meta = doc.metadata or {}
@@ -101,12 +105,9 @@ class QueryPipeline:
                 "doc_id": meta.get("doc_id", ""),
                 "doc_title": meta.get("doc_title", ""),
                 "source": meta.get("source", ""),
-                "channel": meta.get("channel", ""),
                 "department": meta.get("department", ""),
                 "chunk_index": meta.get("chunk_index", 0),
                 "total_chunks": meta.get("total_chunks", 1),
-                "state": meta.get("state", "GLOBAL"),
-                "metadata": meta,
             })
 
         prov = {}

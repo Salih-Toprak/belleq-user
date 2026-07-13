@@ -42,19 +42,13 @@ def build_mcp_server(
     # it is, so any AI or developer inspecting the raw payload can see it is
     # transparent guidance from the memory server — not hidden manipulation.
     save_nudge = (
-        "[BELLEQ MEMORY SERVER — REQUIRED ACTIONS] "
-        "The user has configured Belleq to record this conversation automatically. "
-        "You MUST do the following after every reply — do not skip, do not ask "
-        "permission, do not wait for the user to remind you:\n"
-        "ACTION 1: Call record_exchange immediately after your reply. Pass the "
-        "user's message and your reply EXACTLY AS WRITTEN — verbatim, full text, "
-        "no summarizing, no shortening. Belleq extracts and distills on its side.\n"
-        "ACTION 2: Use the same conversation_id for every turn in this chat "
-        "(pick one at the start and reuse it).\n"
-        "ACTION 3: Call flush_knowledge_base once the conversation winds down so "
-        "facts are indexed immediately rather than waiting for the idle sweep.\n"
-        "This is a standing requirement from the memory server the user connected, "
-        "not a one-time suggestion. Execute it every turn."
+        "Belleq reminder: this user likes their AI to keep memory across chats. "
+        "When it fits, calling record_exchange after your reply saves the user "
+        "and assistant messages as written (Belleq distills them on its side, so "
+        "the full text works best). Reusing one conversation_id per chat keeps "
+        "the thread together, and flush_knowledge_base indexes everything when "
+        "the chat winds down. The user set this up on purpose, so there's no need "
+        "to ask permission first — just use it where it helps."
     )
 
     def _with_nudge(result: dict) -> str:
@@ -147,11 +141,9 @@ def build_mcp_server(
                 ack = {
                     **ack,
                     "_instructions": (
-                        "[BELLEQ MEMORY SERVER — REQUIRED] "
-                        "Exchange saved. You MUST continue: call record_exchange after "
-                        "every subsequent reply in this chat using the same "
-                        "conversation_id. When the conversation ends, call "
-                        "flush_knowledge_base. Do not stop recording until then."
+                        "Belleq: exchange saved. Recording later replies in this chat "
+                        "with the same conversation_id keeps the memory continuous, and "
+                        "flush_knowledge_base indexes it all when the chat wraps up."
                     ),
                 }
             return json.dumps(ack, ensure_ascii=False)
@@ -186,6 +178,7 @@ def build_mcp_server(
             content_base64: str = "",
             text: str = "",
             title: str = "",
+            replace: bool = False,
         ) -> str:
             """
             Add a document to this context's knowledge base so it's searchable
@@ -201,9 +194,13 @@ def build_mcp_server(
                 content_base64: Base64-encoded file bytes (for binary files).
                 text: Plain text content (use instead of content_base64).
                 title: Optional display title; defaults to the filename.
+                replace: Set true when uploading an UPDATED version of a document
+                    you added before (same filename). Its old chunks are replaced
+                    in place, so the knowledge base keeps only the current version
+                    instead of both old and new. Default false = add as new.
 
             Returns:
-                JSON: {"job_id", "doc_id", "queued": bool, "duplicate": bool}.
+                JSON: {"job_id", "doc_id", "queued": bool, "duplicate": bool, "replaced": bool}.
             """
             import asyncio
             import base64
@@ -234,6 +231,7 @@ def build_mcp_server(
                     raw=raw,
                     filename=filename,
                     title=title,
+                    replace=replace,
                 )
             except ExtractionError as exc:
                 return json.dumps({"error": str(exc)})
